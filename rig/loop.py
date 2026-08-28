@@ -15,6 +15,11 @@ Integrations (Linear, Notion, and other connected servers) are NOT in your tool
 list. To use one, call `find_tools` with a keyword to get exact tool names, then
 `call_tool` with the name and arguments.
 
+The conversation above is your context, including when a session is resumed --
+you can see all of it. `recall` searches long-term notes saved in earlier
+sessions; it is not how you remember this one. Never claim you cannot access
+earlier turns that are present in your context.
+
 Report outcomes honestly: if something failed, say so with the error."""
 
 UNTRUSTED_NOTE = """

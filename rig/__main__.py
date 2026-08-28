@@ -102,6 +102,12 @@ async def main():
     if sess is None:
         sess = session.Session.new(mode=mode)
     history = sess.history
+    if history:
+        # Without this the model has no signal it is mid-conversation and can
+        # mistake a resumed session for a cold start.
+        history.append({"role": "user", "content":
+                        f"[session resumed — the {len(history)} messages above "
+                        f"are our earlier conversation and are available to you]"})
 
     prompt = " ".join(argv).strip()
     if prompt:

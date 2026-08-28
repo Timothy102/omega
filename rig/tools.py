@@ -224,14 +224,22 @@ async def run(call, allowed=None) -> str:
         return f"error: {type(e).__name__}: {e}"
 
 
-@tool("remember", "Save a durable fact about the user or their projects to persistent memory.",
+@tool("remember",
+      "Save a durable fact about the user or their projects to long-term memory "
+      "so it survives into FUTURE sessions. The current conversation is already "
+      "remembered without this.",
       {"title": S, "body": S}, ["title", "body"], mutates=True)
 def _remember(title, body):
     from . import memory
     return memory.save(title, body)
 
 
-@tool("recall", "Search persistent memory by regex.", {"query": S}, ["query"])
+@tool("recall",
+      "Search LONG-TERM memory notes saved across sessions with the `remember` "
+      "tool. This is NOT the conversation: everything said in this session, "
+      "including a resumed one, is already in your context above. Do not call "
+      "this to answer questions about what was just discussed.",
+      {"query": S}, ["query"])
 def _recall(query):
     from . import memory
     return truncate(memory.recall(query))
