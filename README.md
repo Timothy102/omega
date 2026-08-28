@@ -37,7 +37,7 @@ Requires Python 3.11+, [ripgrep](https://github.com/BurntSushi/ripgrep), and
 Node (only if you want MCP servers).
 
 ```bash
-git clone https://github.com/USER/rig.git && cd rig
+git clone https://github.com/Timothy102/rig.git && cd rig
 pip install -e .        # or: uv pip install -e .
 ```
 
