@@ -1,0 +1,177 @@
+<!doctype html>
+<meta charset="utf-8"><title>rig setup</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1a1a19;--dim:#6b6b68;--line:#e4e4e1;--card:#fff;--soft:#f4f4f2;
+ --ok:#1a7f4b;--err:#b3261e;--accent:#2b6cb0}
+@media(prefers-color-scheme:dark){:root{--bg:#191918;--fg:#e8e8e5;--dim:#96968f;--line:#33332f;
+ --card:#212120;--soft:#262625;--ok:#4ade80;--err:#f87171;--accent:#7cb3ea}}
+*{box-sizing:border-box}
+body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+ font:14px/1.55 ui-sans-serif,-apple-system,system-ui,sans-serif}
+main{max-width:680px;margin:0 auto;padding:48px 24px 80px}
+h1{font-size:26px;margin:0 0 6px;letter-spacing:-.02em}
+h2{font-size:19px;margin:0 0 6px;letter-spacing:-.01em}
+.sub{color:var(--dim);margin:0 0 26px}
+.steps{display:flex;gap:6px;margin-bottom:34px}
+.steps div{height:3px;flex:1;background:var(--line);border-radius:2px;transition:background .25s}
+.steps div.done{background:var(--ok)}.steps div.now{background:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:26px}
+label{display:block;font-size:12px;color:var(--dim);margin:14px 0 5px}
+input,select{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:7px;
+ background:var(--bg);color:var(--fg);font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button{padding:9px 16px;border:1px solid var(--line);border-radius:7px;background:var(--bg);
+ color:var(--fg);font-size:13px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.primary:hover:not(:disabled){opacity:.9;color:#fff}
+button:disabled{opacity:.45;cursor:default}
+.nav{display:flex;justify-content:space-between;margin-top:26px}
+.ok{color:var(--ok)}.err{color:var(--err)}.dim{color:var(--dim)}
+.mono{font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.msg{margin-top:12px;font-size:13px;min-height:20px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+td,th{padding:7px 4px;border-bottom:1px solid var(--line);text-align:left}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);font-weight:600}
+tr.best td{background:var(--soft)}
+.role{display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;margin-bottom:9px}
+.role .n{font-size:12px}.role .n b{display:block;font:12px ui-monospace,monospace}
+pre{background:var(--soft);border:1px solid var(--line);border-radius:7px;padding:13px;
+ overflow-x:auto;font:12px ui-monospace,monospace;margin:12px 0 0}
+.pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;
+ background:var(--soft);border:1px solid var(--line);margin:2px 4px 2px 0}
+</style>
+<main>
+<h1>rig</h1><p class="sub" id="tagline">Let's get you running.</p>
+<div class="steps" id="steps"></div>
+<div class="card" id="card"></div>
+<div class="nav"><button id="back" onclick="go(-1)">Back</button>
+<button id="next" class="primary" onclick="go(1)">Continue</button></div>
+</main>
+<script>
+const T = new URLSearchParams(location.search).get("t");
+// /api/* is POST-only: GET dispatch was a CSRF-reachable RCE.
+const api=(p,b)=>fetch(p+"?t="+T,{method:"POST",headers:{"Content-Type":"application/json",
+  "X-Rig-Token":T},body:JSON.stringify(b||{})}).then(r=>r.json());
+const $=s=>document.querySelector(s);
+let cfg=null, models=[], bench=[], step=0, keyOk=false, ranTest=false;
+
+const ROLES={main:["Main","drives your session — pick the smartest"],
+  plan:["Planning","read-only research and plans"],
+  subagent_fast:["Fast subagent","bounded lookups — pick the quickest"],
+  subagent_mid:["Mid subagent","reasoning across files"],
+  compact:["Compaction","summarises old context"]};
+
+const STEPS=[
+{t:"Provider",r:()=>`<h2>Connect a provider</h2>
+ <p class="dim">rig talks to any OpenAI-compatible endpoint.</p>
+ <label>Base URL</label><input id="baseUrl" value="${Object.values(cfg.providers)[0].baseUrl}">
+ <label>API key ${Object.values(cfg.providers)[0].hasKey?'<span class="ok">· already stored</span>':''}</label>
+ <input id="apiKey" type="password" placeholder="${Object.values(cfg.providers)[0].hasKey?'•••••••••••• (stored)':'sk-…'}">
+ <div class="msg" id="m"></div>`,
+ enter(){ if(Object.values(cfg.providers)[0].hasKey) verify(); },
+ next:()=>keyOk||verify()},
+
+{t:"Models",r:()=>`<h2>Pick your models</h2>
+ <p class="dim">${models.length} available. Measure them, then assign roles.</p>
+ <button onclick="runBench()" id="bb">Measure latency</button>
+ <span class="mono dim" id="bs"></span>
+ <div id="bt"></div><div id="rs" style="margin-top:20px"></div>`,
+ enter(){ renderRoles(); }},
+
+{t:"Tools",r:()=>`<h2>Connect tools</h2>
+ <p class="dim">MCP servers found in your Claude Code config. Remote ones need OAuth
+ and are skipped; stdio servers work.</p><div id="mc" class="dim">scanning…</div>`,
+ enter(){ loadMcp(); }},
+
+{t:"Test",r:()=>`<h2>Take it for a spin</h2>
+ <p class="dim">Runs one real turn against your config — proof it works end to end.</p>
+ <button onclick="drive()" id="db" class="primary">Run test</button>
+ <div id="dr"></div>`},
+
+{t:"Done",r:()=>`<h2>You're set</h2>
+ <p class="dim">Config written to <span class="mono">~/.rig/config.json</span>.</p>
+ <pre>rig                      # interactive
+rig "fix the failing test"
+rig --plan "add caching"  # read-only planning
+rig --mcp "list my Linear issues"</pre>
+ <p class="dim" style="margin-top:16px">Re-run this anytime with
+ <span class="mono">rig setup</span>.</p>`}];
+
+function render(){
+  $("#steps").innerHTML = STEPS.map((_,i)=>
+    `<div class="${i<step?'done':i===step?'now':''}"></div>`).join("");
+  $("#card").innerHTML = STEPS[step].r();
+  $("#back").style.visibility = step? "visible":"hidden";
+  $("#next").textContent = step===STEPS.length-1? "Finish":"Continue";
+  $("#tagline").textContent = STEPS[step].t;
+  STEPS[step].enter?.();
+}
+async function go(d){
+  if(d>0 && STEPS[step].next && !(await STEPS[step].next())) return;
+  if(d>0 && step===STEPS.length-1){ await save(); $("#next").textContent="Saved"; return; }
+  if(d>0) await save();
+  step=Math.max(0,Math.min(STEPS.length-1,step+d)); render();
+}
+async function verify(){
+  const m=$("#m"); m.textContent="checking…"; m.className="msg dim";
+  const body={}; const k=$("#apiKey")?.value; if(k) body.apiKey=k;
+  if($("#baseUrl")) Object.values(cfg.providers)[0].baseUrl=$("#baseUrl").value;
+  if(k) Object.values(cfg.providers)[0].apiKey=k;
+  else delete Object.values(cfg.providers)[0].apiKey;  // never write back a redacted key
+  const r=await api("/api/models",body);
+  if(r.error){ m.textContent="✗ "+r.error.slice(0,90); m.className="msg err"; return keyOk=false; }
+  models=r.models; keyOk=true;
+  m.innerHTML=`<span class="ok">✓ connected — ${models.length} models available</span>`;
+  return true;
+}
+async function runBench(){
+  const b=$("#bb"); b.disabled=true; $("#bs").textContent=" measuring one at a time…";
+  const r=await api("/api/benchmark",{});
+  bench=r.results||[]; b.disabled=false; $("#bs").textContent="";
+  $("#bt").innerHTML=`<table><tr><th>Model</th><th>Round trip</th></tr>`+
+    bench.map((x,i)=>`<tr class="${i===0&&x.ok?'best':''}"><td class="mono">${x.model}</td>
+    <td class="${x.ok?'ok':'err'} mono">${x.ok?x.ms+"ms":x.error}</td></tr>`).join("")+`</table>`;
+  renderRoles();
+}
+function renderRoles(){
+  const fast=bench.filter(b=>b.ok)[0]?.model;
+  $("#rs").innerHTML=Object.entries(ROLES).map(([k,[n,d]])=>`<div class="role">
+    <span class="n">${n}<b>${k}</b></span>
+    <select data-role="${k}">${(models.length?models:[cfg.roles[k].model])
+      .map(m=>`<option${m===cfg.roles[k].model?" selected":""}>${m}</option>`).join("")}</select>
+    </div><p class="dim" style="margin:-4px 0 12px;font-size:12px">${d}${
+      fast&&k.includes("fast")?` — fastest measured: <b>${fast}</b>`:""}</p>`).join("");
+}
+async function loadMcp(){
+  const {servers}=await api("/api/mcp/discover");
+  const stdio=servers.filter(s=>s.stdio), remote=servers.filter(s=>!s.stdio);
+  $("#mc").innerHTML=`<table><tr><th>Server</th><th></th><th></th></tr>`+
+    stdio.map(s=>`<tr><td>${s.name}</td><td class="mono dim">${s.detail}</td>
+      <td style="width:150px"><button onclick="testMcp('${s.name}',this)">test</button>
+      <span class="mono"></span></td></tr>`).join("")+`</table>
+    <p class="dim" style="margin-top:14px">${remote.length} remote server${remote.length===1?"":"s"}
+    skipped (OAuth): ${remote.map(s=>`<span class="pill">${s.name}</span>`).join("")}</p>`;
+}
+async function testMcp(name,btn){
+  const out=btn.nextElementSibling; out.textContent=" connecting…"; btn.disabled=true;
+  const spec=(await api("/api/config")).mcp?.[name];
+  const r=await api("/api/mcp/test",{name,config:spec||{}});
+  out.textContent=r.ok?` ${r.tools.length} tools`:` ${(r.error||"failed").slice(0,20)}`;
+  out.className="mono "+(r.ok?"ok":"err"); btn.disabled=false;
+}
+async function drive(){
+  const b=$("#db"); b.disabled=true; b.textContent="running…";
+  const r=await api("/api/agent",{prompt:"Run 'pwd' and 'date' with bash, then say in one short sentence where you are and what day it is."});
+  b.disabled=false; b.textContent="Run again"; ranTest=r.ok;
+  $("#dr").innerHTML=r.ok
+    ?`<p style="margin-top:14px">${r.tools.map(t=>`<span class="pill">⏺ ${t}</span>`).join("")}</p>
+      <pre>${r.text.replace(/[<>]/g,"")}</pre><p class="ok" style="margin-top:10px">✓ working</p>`
+    :`<pre class="err">${(r.error||"failed").replace(/[<>]/g,"")}</pre>`;
+}
+async function save(){
+  document.querySelectorAll("select[data-role]").forEach(s=>cfg.roles[s.dataset.role].model=s.value);
+  await api("/api/save",cfg);
+}
+api("/api/config").then(c=>{cfg=c; render();});
+</script>
