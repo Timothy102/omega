@@ -17,6 +17,69 @@ CALL_TIMEOUT = 120
 # and subagents instead of every MCP tool being treated as mutating.
 READ_PREFIXES = ("get_", "list_", "search", "read_", "fetch", "query", "resolve")
 
+DESC_LIMIT = 2000        # descriptions drive tool SELECTION -- keep them
+PARAMS_LIMIT = 1500      # inputSchema is 78% of the bytes and mostly noise
+ENUM_LIMIT = 12
+NOISE_KEYS = {"examples", "example", "default", "$comment", "$schema", "$id",
+              "additionalProperties", "readOnly", "writeOnly", "deprecated"}
+
+
+def prune_schema(node, depth=0):
+    """Strip JSON Schema down to what a model needs to CALL a tool.
+
+    Measured on linear+notion+posthog: descriptions were 59.5k chars, parameters
+    143k. rig previously capped descriptions and passed parameters untouched --
+    exactly backwards, since descriptions are what tool selection depends on.
+    """
+    if isinstance(node, list):
+        return [prune_schema(x, depth + 1) for x in node[:ENUM_LIMIT]]
+    if not isinstance(node, dict):
+        return node
+
+    out = {}
+    for k, v in node.items():
+        if k in NOISE_KEYS:
+            continue
+        if k == "enum" and isinstance(v, list):
+            out[k] = v[:ENUM_LIMIT] if len(v) <= ENUM_LIMIT else v[:ENUM_LIMIT]
+            continue
+        if k == "description" and isinstance(v, str):
+            out[k] = v[:300]
+            continue
+        if k in ("anyOf", "oneOf", "allOf") and isinstance(v, list):
+            # deep unions explode; the first branch is enough to call the tool
+            if depth >= 2:
+                continue
+            out[k] = [prune_schema(x, depth + 1) for x in v[:3]]
+            continue
+        if depth >= 6:
+            continue
+        out[k] = prune_schema(v, depth + 1)
+    return out
+
+
+def fit_params(schema: dict) -> dict:
+    """Prune, then drop optional property descriptions until it fits."""
+    pruned = prune_schema(schema or {"type": "object", "properties": {}})
+    if len(json.dumps(pruned)) <= PARAMS_LIMIT:
+        return pruned
+    required = set(pruned.get("required") or [])
+    for name, prop in (pruned.get("properties") or {}).items():
+        if name not in required and isinstance(prop, dict):
+            prop.pop("description", None)
+    if len(json.dumps(pruned)) <= PARAMS_LIMIT:
+        return pruned
+    props = pruned.get("properties") or {}
+    kept = {k: v for k, v in props.items() if k in required}
+    for k, v in props.items():
+        if k in kept:
+            continue
+        if len(json.dumps({**kept, k: v})) > PARAMS_LIMIT:
+            break
+        kept[k] = v
+    pruned["properties"] = kept
+    return pruned
+
 
 def discover(paths=None) -> dict:
     """rig's own mcp block wins; Claude Code's config and installed plugins
@@ -139,6 +202,11 @@ def _register(server: Server, tool) -> str:
             return f"error: MCP server {server.name!r} timed out after {CALL_TIMEOUT}s"
         parts = [c.text for c in result.content if getattr(c, "text", None)]
         body = tools.truncate("\n".join(parts) or "(no content)")
+        # Remote content is writable by anyone in that workspace: mark the turn
+        # so bash drops to ASK for the rest of it.
+        tools.set_tainted(True)
+        body = (f"<untrusted source=\"mcp:{server.name}/{tool.name}\">\n{body}\n"
+                f"</untrusted>")
         if getattr(result, "isError", False):
             return f"error: {body}"
         return body
@@ -146,11 +214,11 @@ def _register(server: Server, tool) -> str:
     if reads:
         tools.READ_ONLY.add(name)
     tools.REGISTRY[name] = {
-        "fn": call, "locks_path": None, "mutates": not reads,
+        "fn": call, "locks_path": None, "mutates": not reads, "deferred": True,
         "schema": {"type": "function", "function": {
             "name": name,
-            "description": (tool.description or "")[:900],
-            "parameters": tool.inputSchema or {"type": "object", "properties": {}},
+            "description": (tool.description or "")[:DESC_LIMIT],
+            "parameters": fit_params(tool.inputSchema),
         }},
     }
     return name

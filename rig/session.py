@@ -111,4 +111,6 @@ def render_list(limit=20) -> str:
         lines.append(f"{s.id:<22}{ago:>6}{s.turns:>6}  {cwd:<24}"
                      f"{s.first_prompt(200)}")
     # hard-truncate: a wrapped row makes the list unreadable and unparseable
-    return "\n".join(l[:cols - 1] + "…" if len(l) >= cols else l for l in lines)
+    # Stay strictly under the terminal width: a line of exactly `cols` chars
+    # still wraps in some terminals.
+    return "\n".join(l[:cols - 2] + "…" if len(l) >= cols - 1 else l for l in lines)

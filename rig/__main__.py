@@ -6,7 +6,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 
-from . import config, loop, mcp, session, subagent
+from . import config, loop, mcp, permissions, session, subagent, tools
 
 console = Console()
 BANNER = "[dim]rig — /plan to plan, /build to execute, ctrl-d to exit[/dim]"
@@ -48,24 +48,41 @@ async def main():
     if argv and argv[0] == "sessions":
         return console.print(session.render_list())
 
+    # Parse every flag up front so order never matters.
+    flags = {a for a in argv if a.startswith("-")}
+    use_mcp, yolo = "--mcp" in flags, "--yolo" in flags
+    want_plan = bool(flags & {"--plan", "-p"})
+    want_continue = bool(flags & {"--continue", "-c"})
+    resume_id = None
+    if "--resume" in argv:
+        i = argv.index("--resume")
+        if i + 1 >= len(argv):
+            return console.print("[red]--resume needs a session id[/red] "
+                                 "(see `rig sessions`)")
+        resume_id = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+    argv = [a for a in argv
+            if a not in ("--mcp", "--yolo", "--plan", "-p", "--continue", "-c")]
+
     cfg = config.load()
     subagent.CFG = cfg
+    if not yolo and sys.stdin.isatty():
+        tools.CONFIRM = confirm
 
     sess = None
-    if argv and argv[0] in ("--continue", "-c"):
-        sess, argv = session.latest(), argv[1:]
+    if want_continue:
+        sess = session.latest()
         if sess is None:
-            return console.print("[dim]no session to continue[/dim]")
-    elif argv and argv[0] == "--resume":
-        sess, argv = session.load(argv[1]), argv[2:]
+            return console.print("[dim]no session for this directory[/dim]")
+    elif resume_id:
+        sess = session.load(resume_id)
     if sess:
         console.print(f"[dim]resumed {sess.id} — {sess.turns} turns, "
                       f"{len(sess.history)} messages · {sess.cwd}[/dim]")
-    use_mcp = "--mcp" in argv
-    argv = [a for a in argv if a != "--mcp"]
-    mode = "build"
-    if argv and argv[0] in ("--plan", "-p"):
-        mode, argv = "plan", argv[1:]
+
+    # An explicit --plan must win over the stored mode: silently ignoring a
+    # read-only flag is a safety bug, not a papercut.
+    mode = "plan" if want_plan else (sess.mode if sess else "build")
 
     if use_mcp:
         with console.status("[dim]connecting MCP servers…[/dim]"):
@@ -74,8 +91,6 @@ async def main():
 
     if sess is None:
         sess = session.Session.new(mode=mode)
-    else:
-        mode = sess.mode
     history = sess.history
 
     prompt = " ".join(argv).strip()
@@ -99,6 +114,23 @@ async def main():
             continue
         if line:
             await one_shot(cfg, history, line, mode, sess)
+
+
+async def confirm(name, args, why) -> bool:
+    detail = str(args.get("command") or args.get("path")
+                 or args.get("name") or "")[:200]
+    console.print(f"\n[yellow]⏸  {name}[/yellow] [dim]{why}[/dim]")
+    if detail:
+        console.print(f"   [bold]{detail}[/bold]", highlight=False)
+    try:
+        answer = (await asyncio.to_thread(
+            input, "   allow? [y]es / [N]o / [a]lways: ")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if answer == "a":
+        permissions.remember(permissions.rule_for(name, args), permissions.ALLOW)
+        return True
+    return answer.startswith("y")
 
 
 async def one_shot(cfg, history, prompt, mode, sess=None):

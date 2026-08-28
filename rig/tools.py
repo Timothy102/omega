@@ -1,10 +1,22 @@
 import asyncio, fnmatch, inspect, os, shutil as _shutil, signal, subprocess, time
 from collections import defaultdict
+
+from . import permissions
 from pathlib import Path
 
 MAX_OUTPUT = 30000
 REGISTRY: dict = {}
 _locks: dict = defaultdict(asyncio.Lock)
+
+# Set by the CLI. None means no prompting (scripted / --yolo).
+CONFIRM = None
+_confirm_lock = asyncio.Lock()
+TAINTED = False
+
+
+def set_tainted(value: bool):
+    global TAINTED
+    TAINTED = value
 
 
 def truncate(text: str, limit: int = MAX_OUTPUT) -> str:
@@ -18,12 +30,14 @@ def truncate(text: str, limit: int = MAX_OUTPUT) -> str:
             f"... [truncated {dropped} chars from the middle] ...\n{text[-tail:]}")
 
 
-def tool(name, description, params, required, locks_path=None, mutates=False):
+def tool(name, description, params, required, locks_path=None, mutates=False,
+         deferred=False):
     def wrap(fn):
         REGISTRY[name] = {
             "fn": fn,
             "locks_path": locks_path,
             "mutates": mutates,
+            "deferred": deferred,
             "schema": {
                 "type": "function",
                 "function": {
@@ -38,13 +52,20 @@ def tool(name, description, params, required, locks_path=None, mutates=False):
     return wrap
 
 
-READ_ONLY = {"read", "grep", "glob", "recall", "subagent"}
+READ_ONLY = {"read", "grep", "glob", "recall", "subagent", "find_tools", "call_tool"}
 
 
 def schemas(names=None) -> list:
+    """Deferred tools stay out of the prefix: they are reachable via
+    find_tools/call_tool instead of costing tokens on every request."""
     if names is None:
-        return [t["schema"] for t in REGISTRY.values()]
-    return [t["schema"] for n, t in REGISTRY.items() if n in names]
+        return [t["schema"] for n, t in REGISTRY.items() if not t.get("deferred")]
+    return [t["schema"] for n, t in REGISTRY.items()
+            if n in names and not t.get("deferred")]
+
+
+def deferred() -> dict:
+    return {n: t for n, t in REGISTRY.items() if t.get("deferred")}
 
 
 S = {"type": "string"}
@@ -54,7 +75,12 @@ I = {"type": "integer"}
 @tool("read", "Read a file. Returns numbered lines.",
       {"path": S, "offset": I, "limit": I}, ["path"])
 def _read(path, offset=0, limit=2000):
-    lines = Path(path).expanduser().read_text(errors="replace").splitlines()
+    p = Path(path).expanduser()
+    try:
+        p.resolve().relative_to(Path(os.getcwd()).resolve())
+    except ValueError:
+        set_tainted(True)
+    lines = p.read_text(errors="replace").splitlines()
     chosen = lines[offset:offset + limit]
     width = len(str(offset + len(chosen)))
     return truncate("\n".join(f"{i + offset + 1:>{width}}\t{l}"
@@ -90,7 +116,8 @@ def _bash(command, timeout=120):
     # start_new_session puts the child in its own process group, so a timeout
     # can kill the whole tree; subprocess.run would only kill the shell and
     # leave its children running forever.
-    timeout = max(1, min(int(timeout or 120), 600))
+    # `timeout or 120` would treat an explicit 0 as "not supplied".
+    timeout = max(1, min(int(120 if timeout is None else timeout), 600))
     p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True, cwd=os.getcwd(),
                          start_new_session=True)
@@ -170,6 +197,21 @@ async def run(call, allowed=None) -> str:
         return f"error: unknown tool {call.name!r}"
     try:
         args = call.args()
+
+        verdict, why = permissions.decide(call.name, args, tainted=TAINTED)
+        if verdict == permissions.DENY:
+            return (f"error: refused -- {why}. This is a hard limit; do not "
+                    f"retry it or work around it. Tell the user instead.")
+        if verdict == permissions.ASK:
+            if CONFIRM is None:
+                return (f"error: {call.name} requires confirmation ({why}) but "
+                        f"rig is running non-interactively. Re-run without --yolo "
+                        f"in a terminal, or narrow the command.")
+            # Serialized: parallel dispatch would interleave prompts.
+            async with _confirm_lock:
+                ok = await CONFIRM(call.name, args, why)
+            if not ok:
+                return "error: denied by user"
         fn = entry["fn"]
         call_it = ((lambda: fn(**args)) if inspect.iscoroutinefunction(fn)
                    else (lambda: asyncio.to_thread(fn, **args)))
@@ -193,3 +235,49 @@ def _remember(title, body):
 def _recall(query):
     from . import memory
     return truncate(memory.recall(query))
+
+
+@tool("find_tools",
+      "Search the deferred tool catalog (Linear, Notion, and other connected "
+      "MCP servers) by keyword. Returns tool names, descriptions and parameters. "
+      "Use this BEFORE call_tool when you need an integration, then pass the "
+      "exact name to call_tool.",
+      {"query": S, "limit": I}, ["query"])
+def _find_tools(query, limit=8):
+    terms = [w for w in query.lower().split() if len(w) > 2]
+    scored = []
+    for name, entry in deferred().items():
+        fn = entry["schema"]["function"]
+        hay = (name + " " + (fn.get("description") or "")).lower()
+        score = sum(hay.count(w) for w in terms)
+        if score:
+            scored.append((score, name, fn))
+    if not scored:
+        return (f"no tools matched {query!r}. "
+                f"{len(deferred())} tools available across "
+                f"{len({n.split('__')[1] for n in deferred()})} servers.")
+    scored.sort(key=lambda x: -x[0])
+    out = []
+    for _, name, fn in scored[:limit]:
+        params = list((fn.get("parameters") or {}).get("properties") or {})
+        req = (fn.get("parameters") or {}).get("required") or []
+        out.append(f"{name}\n  {(fn.get('description') or '')[:280]}\n"
+                   f"  params: {', '.join(params[:14]) or '(none)'}"
+                   f"{'  required: ' + ', '.join(req) if req else ''}")
+    return truncate("\n\n".join(out), 8000)
+
+
+@tool("call_tool",
+      "Invoke a tool found via find_tools. `name` must be an exact name from "
+      "find_tools output; `arguments` is a JSON object of its parameters.",
+      {"name": S, "arguments": {"type": "object"}}, ["name"], mutates=True)
+async def _call_tool(name, arguments=None):
+    entry = REGISTRY.get(name)
+    if entry is None or not entry.get("deferred"):
+        return (f"error: {name!r} is not a deferred tool. "
+                f"Use find_tools first to get an exact name.")
+    fn = entry["fn"]
+    args = arguments or {}
+    if inspect.iscoroutinefunction(fn):
+        return await fn(**args)
+    return await asyncio.to_thread(fn, **args)
