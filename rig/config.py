@@ -59,8 +59,11 @@ def load() -> Config:
     for name, p in raw["providers"].items():
         key = p.get("apiKey") or os.environ.get(p.get("apiKeyEnv", ""), "")
         if not key:
-            hint = f"env {p['apiKeyEnv']}" if p.get("apiKeyEnv") else "apiKey"
-            raise SystemExit(f"rig: no API key for provider {name!r} (set {hint})")
+            hint = (f"export {p['apiKeyEnv']}=..." if p.get("apiKeyEnv")
+                    else f'set "apiKey" in {CONFIG_PATH}')
+            raise SystemExit(
+                f"rig: no API key for provider {name!r}.\n"
+                f"  Run `rig setup` to configure one, or {hint}")
         providers[name] = Provider(name, p["baseUrl"].rstrip("/"), key)
 
     roles = {}
