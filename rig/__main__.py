@@ -46,6 +46,16 @@ async def main():
         from .setup_server import serve
         return serve()
     if argv and argv[0] == "sessions":
+        # `sessions` lists and exits; silently swallowing further flags made
+        # `rig sessions --resume X` look like it had done something.
+        extra = [a for a in argv[1:] if a != "--"]
+        if extra:
+            console.print(f"[yellow]note:[/yellow] `sessions` only lists — "
+                          f"ignoring {' '.join(extra)}")
+            if "--resume" in extra:
+                i = extra.index("--resume")
+                sid = extra[i + 1] if i + 1 < len(extra) else "<id>"
+                console.print(f"      to open it:  [bold]rig --resume {sid}[/bold]")
         return console.print(session.render_list())
 
     # Parse every flag up front so order never matters.
