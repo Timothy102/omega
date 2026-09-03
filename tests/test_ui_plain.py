@@ -95,3 +95,45 @@ def test_render_error_shows_only_first_line_with_glyph(isolate_console):
     assert "FileNotFoundError: no such file" in out
     assert "traceback" not in out
     assert "✗" in out
+
+
+def test_render_checkpoint_verified_job_events(isolate_console):
+    plain.render(events.Checkpoint(turn=1, id="cp1"))
+    plain.render(events.Verified(results_summary="pytest ok", ok=True))
+    plain.render(events.Verified(results_summary="pytest failed", ok=False))
+    plain.render(events.JobStarted(id="j1", command="sleep 1"))
+    plain.render(events.JobFinished(id="j1", exit_code=0))
+    plain.render(events.JobFinished(id="j1", exit_code=1))
+    out = isolate_console.getvalue()
+    assert "checkpoint" in out
+    assert "verified: pytest ok" in out
+    assert "verification failed: pytest failed" in out
+    assert "job j1 started" in out
+    assert "job j1 finished (exit 0)" in out
+    assert "job j1 finished (exit 1)" in out
+
+
+@pytest.mark.asyncio
+async def test_run_prompt_survives_a_render_error_and_still_closes_the_turn(
+        monkeypatch, isolate_console, tmp_path):
+    from omega import loop, session
+
+    monkeypatch.setattr(session, "DIR", tmp_path)
+    sess = session.Session.new(cwd=str(tmp_path))
+
+    def broken_render(ev):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(plain, "render", broken_render)
+
+    async def fake_run_turn(cfg, history, mode, emit, model=None):
+        emit(events.Done("hi"))
+        history.append({"role": "assistant", "content": "hi"})
+
+    monkeypatch.setattr(loop, "run_turn", fake_run_turn)
+
+    await plain.run_prompt(cfg=None, history=sess.history, prompt="hello", mode="build", sess=sess)
+
+    out = isolate_console.getvalue()
+    assert "render error" in out
+    assert sess.history[-1] == {"role": "assistant", "content": "hi"}

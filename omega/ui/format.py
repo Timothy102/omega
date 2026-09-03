@@ -17,6 +17,16 @@ from rich.markup import escape
 
 from .. import events
 
+# A plain assignment, not `import escape as esc` -- mypy strict's
+# no-implicit-reexport rule hides a renamed import from other modules unless
+# it's re-exported via `__all__`, but a module-level name binding like this
+# one is an ordinary public attribute. `format.esc` is used by every module
+# that renders model/tool/user-derived text into rich markup (`transcript.py`,
+# `sidebar.py`, `plain.py`) -- a literal "[" in a bash command, a commit
+# subject, or a provider error message must never be parsed as a style tag
+# (that raised `MarkupError` and aborted the turn before this was added).
+esc = escape
+
 # ---- paths ---------------------------------------------------------------
 
 
@@ -248,6 +258,11 @@ def describe_call(name: str, args: dict[str, Any]) -> str:
 
 _EXIT_RE = re.compile(r"\[exit (\d+)\]")
 _FULL_CHARS_RE = re.compile(r"\[full output: (\d+) chars")
+# Strips the `<untrusted source="...">...</untrusted>` wrapper (mcp.py) from
+# an error PREVIEW only -- the model still sees the full wrapped text, this
+# just keeps the wrapper's own markup out of the human-facing "→ error: …"
+# line, which was otherwise eating most of an already-short truncation budget.
+_UNTRUSTED_WRAP_RE = re.compile(r'<untrusted source="[^"]*">\s*|\s*</untrusted>\s*$')
 
 
 def result_char_count(text: str, offloaded: bool) -> int:
@@ -267,7 +282,8 @@ def describe_outcome(name: str, text: str, duration_s: float, offloaded: bool,
     means nothing worth showing (a fast, ordinary, non-offloaded call)."""
     stripped = text.strip()
     if stripped.startswith("error:"):
-        return f"→ error: {_truncate(stripped[len('error:'):].strip(), 80)}"
+        detail = _UNTRUSTED_WRAP_RE.sub("", stripped[len('error:'):].strip()).strip()
+        return f"→ error: {_truncate(detail, 200)}"
 
     parts: list[str] = []
     no_hits = stripped in ("(no matches)", "")
@@ -312,46 +328,77 @@ def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True,
     detail = _without_name(ev.name, ev.args_preview)
     if width is not None:
         detail = truncate_middle(detail, width)
+    detail = esc(detail)
     name_col = pad_name(ev.name)
     if ev.subagent_id:
-        suffix = f"  ({ev.tier}·{ev.subagent_id})" if show_subagent_suffix else ""
-        return f"  [dim]└ [{style}]{name_col}[/{style}]{escape(detail)}{suffix}[/dim]"
-    return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{escape(detail)}"
+        suffix = f"  ({esc(ev.tier or '')}·{esc(ev.subagent_id)})" if show_subagent_suffix else ""
+        return f"  [dim]└ [{style}]{name_col}[/{style}]{detail}{suffix}[/dim]"
+    return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{detail}"
 
 
 def tool_end(ev: events.ToolEnd) -> str | None:
     if ev.offloaded:
-        return f"  [dim]↳ {escape(ev.outcome) or f'offloaded → artifact {ev.artifact_id}'}[/dim]"
+        text = ev.outcome or f"offloaded → artifact {ev.artifact_id}"
+        return f"  [dim]↳ {esc(text)}[/dim]"
     if ev.outcome.startswith("→ error") or (ev.name == "bash" and "exit" in ev.outcome):
-        return f"  [dim]{escape(ev.outcome)}[/dim]"
+        return f"  [dim]{esc(ev.outcome)}[/dim]"
     if ev.name in ("find_tools", "call_tool", "recall") and ev.outcome:
-        return f"  [dim]{escape(ev.outcome)}[/dim]"
+        return f"  [dim]{esc(ev.outcome)}[/dim]"
     return None
 
 
 def subagent_spawned(ev: events.SubagentSpawned, *, show_id: bool = False) -> str:
-    id_suffix = f"  [dim]{ev.subagent_id}[/dim]" if show_id else ""
-    return (f"[green]●[/green] [bold green]subagent[/bold green]([green]{ev.tier}[/green]) "
-           f"{escape(ev.task_preview)}{id_suffix}")
+    id_suffix = f"  [dim]{esc(ev.subagent_id)}[/dim]" if show_id else ""
+    return (f"[green]●[/green] [bold green]subagent[/bold green]([green]{esc(ev.tier)}[/green]) "
+           f"{esc(ev.task_preview)}{id_suffix}")
 
 
 def subagent_done(ev: events.SubagentDone, task_preview: str = "", elapsed_s: float = 0.0) -> str:
-    task = task_preview or ev.subagent_id
-    return f'[green]●[/green] Agent [bold]"{escape(task)}"[/bold] finished · {elapsed_s:.0f}s'
+    task = esc(task_preview or ev.subagent_id)
+    return f'[green]●[/green] Agent [bold]"{task}"[/bold] finished · {elapsed_s:.0f}s'
 
 
 def compacted(ev: events.Compacted) -> str:
-    return f"[dim]⏺ {escape(ev.note)}[/dim]"
+    return f"[dim]⏺ {esc(ev.note)}[/dim]"
 
 
 def memory_write(ev: events.MemoryWrite) -> str:
-    return f"  [blue]◆[/blue] [dim]memory: {ev.type} '{escape(ev.title)}' ({ev.scope})[/dim]"
+    return (f"  [blue]◆[/blue] [dim]memory: {esc(ev.type)} '{esc(ev.title)}' "
+           f"({esc(ev.scope)})[/dim]")
 
 
 def memory_consolidated(ev: events.MemoryConsolidated) -> str:
-    return f"  [blue]◆[/blue] [dim]memory: {escape(ev.summary)}[/dim]"
+    return f"  [blue]◆[/blue] [dim]memory: {esc(ev.summary)}[/dim]"
 
 
 def error(ev: events.Error) -> str:
     first_line = ev.message.splitlines()[0] if ev.message else ""
-    return f"[red]✗[/red] error  {escape(first_line)}"
+    return f"[red]✗[/red] error  {esc(first_line)}"
+
+
+# ---- B1's edit-safety events (Checkpoint/Verified/JobStarted/JobFinished) --
+# These dataclasses live in `events.py`, which B1 owns and may not have
+# landed yet -- callers duck-type on the attributes below (matching the
+# signatures agreed in the plan) rather than importing the classes.
+
+
+def checkpoint(ev: Any) -> str:
+    return "[dim]⎘ checkpoint[/dim]"
+
+
+def verified(ev: Any) -> str:
+    summary = esc(str(ev.results_summary))
+    if ev.ok:
+        return f"[dim]✓ verified: {summary}[/dim]"
+    return f"[red]✗ verification failed: {summary}[/red]"
+
+
+def job_started(ev: Any) -> str:
+    return f"[dim]⟳ job {esc(str(ev.id))} started[/dim]"
+
+
+def job_finished(ev: Any) -> str:
+    job_id = esc(str(ev.id))
+    if ev.exit_code == 0:
+        return f"[dim]✓ job {job_id} finished (exit 0)[/dim]"
+    return f"[dim]✗ job {job_id} finished (exit {ev.exit_code})[/dim]"

@@ -17,12 +17,12 @@ from textual.timer import Timer
 from textual.widgets import Input, Static
 from textual.worker import Worker
 
-from ... import config, events, gitlog, loop, session
+from ... import compact, config, events, export, gitlog, loop, session, trace
 from ...memory import consolidate
 from .. import format
 from . import prefs
 from .history import InputHistory
-from .modals import AskUserScreen, ConfirmScreen, ModelPickerScreen
+from .modals import AskUserScreen, ConfirmScreen, DiffScreen, ModelPickerScreen, SessionsScreen
 from .sidebar import Sidebar
 from .status import StatusBar, StatusState
 from .transcript import Transcript
@@ -30,12 +30,24 @@ from .transcript import Transcript
 _MODE_ROLE = {"build": "main", "plan": "plan", "discuss": "discuss"}
 _MODE_TAG_STYLE = {"build": "dim", "plan": "yellow", "discuss": "$accent"}
 
-_COMMANDS = ["/plan", "/build", "/discuss", "/mode", "/memory-gc", "/model", "/sidebar", "/help", "/quit"]
+_COMMANDS = ["/plan", "/build", "/discuss", "/mode", "/memory-gc", "/model", "/sidebar",
+            "/cost", "/export", "/compact", "/undo", "/diff", "/verify", "/sessions",
+            "/help", "/quit"]
 
 _HELP_TEXT = (
     "ctrl+c cancel turn  ·  ctrl+o /model switch model  ·  ctrl+b toggle side panel\n"
     "ctrl+1/2/3 or [ ] switch side-panel tab  ·  up/down input history\n"
-    "/plan /build /discuss switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  /memory-gc  ·  /quit")
+    "/plan /build /discuss switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  /memory-gc\n"
+    "/cost tokens & $  ·  /export [path]  ·  /compact  ·  /undo [n]  ·  /diff  ·  /verify  ·  "
+    "/sessions  ·  /quit")
+
+# `events.Checkpoint`/`Verified`/`JobStarted`/`JobFinished` are B1's, added to
+# events.py concurrently with this file -- resolved once at import time so
+# `emit()` below can dispatch to them without a hard import dependency.
+_Checkpoint = getattr(events, "Checkpoint", None)
+_Verified = getattr(events, "Verified", None)
+_JobStarted = getattr(events, "JobStarted", None)
+_JobFinished = getattr(events, "JobFinished", None)
 
 # Git branch per cwd, cached for the life of the process and refreshed
 # explicitly at turn end -- a `git symbolic-ref` per header repaint would be
@@ -106,6 +118,10 @@ class OmegaApp(App[None]):
         self.history = history
         self.model_alias = model_alias
         self._usage: events.Usage | None = None
+        # Cumulative tokens for this session, by model alias (or the raw
+        # model id when no alias applies) -- `/cost` sums these against
+        # `eval.prices`, unlike `_usage` above which only holds the latest event.
+        self._usage_totals: dict[str, dict[str, int]] = {}
         self._last_model: tuple[str | None, str] | None = None
         self._phase = "idle"
         self._turn_worker: Worker[None] | None = None
@@ -206,12 +222,20 @@ class OmegaApp(App[None]):
         self.query_one(Sidebar).git_tab.refresh_repos()
 
     def emit(self, ev: events.Event) -> None:
-        # A rendering bug must never abort the agent's turn.
+        trace.append(self.sess.id, ev, self.sess.turns)
+        # A rendering bug (an unescaped model string reaching rich's markup
+        # parser, say) must never abort the turn the model is mid-way through
+        # -- show one dim marker and keep going instead of propagating. The
+        # inner try/except is deliberate: even the marker line's own render
+        # must not be able to re-raise and kill the turn a second time.
         try:
             self._dispatch(ev)
         except Exception as e:
+            # `add_dim` escapes its own text, so pass the raw message through --
+            # escaping it here too would double-escape.
             try:
-                self.query_one(Transcript).add_dim(f"⚠ render error: {type(e).__name__}: {escape(str(e))[:120]}")
+                self.query_one(Transcript).add_dim(
+                    f"⚠ render error: {type(e).__name__}: {str(e)[:120]}")
             except Exception:
                 pass
 
@@ -255,6 +279,7 @@ class OmegaApp(App[None]):
                 transcript.add_error(ev)
             case events.Usage():
                 self._usage = ev
+                self._accumulate_usage(ev)
                 sidebar.session_tab.record_usage(ev)
                 transcript.note_usage(ev)
                 self._refresh_status()
@@ -264,6 +289,46 @@ class OmegaApp(App[None]):
                 self._refresh_status()
             case events.Done(text=text):
                 transcript.finalize_turn(text)
+        if _Checkpoint is not None and isinstance(ev, _Checkpoint):
+            transcript.add_checkpoint(ev)
+        elif _Verified is not None and isinstance(ev, _Verified):
+            transcript.add_verified(ev)
+        elif _JobStarted is not None and isinstance(ev, _JobStarted):
+            transcript.add_job_started(ev)
+        elif _JobFinished is not None and isinstance(ev, _JobFinished):
+            transcript.add_job_finished(ev)
+
+    def _accumulate_usage(self, ev: events.Usage) -> None:
+        alias = (self._last_model[0] or self._last_model[1]) if self._last_model else "?"
+        totals = self._usage_totals.setdefault(
+            alias, {"prompt": 0, "completion": 0, "cache_read": 0, "cache_write": 0})
+        totals["prompt"] += ev.prompt_tokens
+        totals["completion"] += ev.completion_tokens
+        totals["cache_read"] += ev.cache_read
+        totals["cache_write"] += ev.cache_write
+
+    def _cost_text(self) -> str:
+        if not self._usage_totals:
+            return "no usage yet this session"
+        from ...eval import prices
+
+        lines = []
+        grand_total = 0.0
+        any_unpriced = False
+        for alias, t in sorted(self._usage_totals.items()):
+            cost = prices.estimate_cost(alias, t["prompt"], t["completion"])
+            if cost is None:
+                any_unpriced = True
+                cost_text = "unknown"
+            else:
+                grand_total += cost
+                cost_text = f"${cost:.4f}"
+            lines.append(f"{alias}: {t['prompt']} in / {t['completion']} out "
+                        f"(cache {t['cache_read']} read / {t['cache_write']} write) · {cost_text}")
+        if len(self._usage_totals) > 1:
+            suffix = " + unpriced models" if any_unpriced else ""
+            lines.append(f"total: ${grand_total:.4f}{suffix}")
+        return "\n".join(lines)
 
     def on_input_submitted(self, message: Input.Submitted) -> None:
         if message.input.id != "prompt":
@@ -306,6 +371,24 @@ class OmegaApp(App[None]):
             self._set_model(text[len("/model "):].strip())
         elif text == "/sidebar":
             self.action_toggle_sidebar()
+        elif text == "/cost":
+            transcript.add_dim(self._cost_text())
+        elif text == "/export" or text.startswith("/export "):
+            path = text[len("/export"):].strip() or None
+            out = export.write(self.history, self.sess.id, path)
+            transcript.add_dim(f"exported to {out}")
+        elif text == "/compact":
+            self.run_worker(self._force_compact(), exclusive=False, thread=False)
+        elif text == "/undo" or text.startswith("/undo "):
+            arg = text[len("/undo"):].strip()
+            steps = int(arg) if arg.isdigit() else 1
+            self.run_worker(self._undo(steps), exclusive=False, thread=False)
+        elif text == "/diff":
+            self.run_worker(self._diff(), exclusive=False, thread=False)
+        elif text == "/verify":
+            self.run_worker(self._verify(), exclusive=False, thread=False)
+        elif text == "/sessions":
+            self.run_worker(self._pick_session(), exclusive=False, thread=False)
         elif text in ("/help", "?"):
             transcript.add_dim(_HELP_TEXT)
         elif text == "/quit":
@@ -317,6 +400,88 @@ class OmegaApp(App[None]):
         transcript = self.query_one(Transcript)
         transcript.add_dim(await consolidate.run(self.cfg, "project", force=True))
         transcript.add_dim(await consolidate.run(self.cfg, "global", force=True))
+
+    def _context_limit(self) -> int:
+        role = self.cfg.model(self.model_alias) if self.model_alias else self.cfg.role(self._role_name())
+        return role.context
+
+    async def _force_compact(self) -> None:
+        transcript = self.query_one(Transcript)
+        limit = self._context_limit()
+        note = await compact.maybe_compact(self.cfg, self.history, used=limit, limit=limit)
+        transcript.add_dim(note or "nothing to compact")
+
+    async def _undo(self, steps: int) -> None:
+        transcript = self.query_one(Transcript)
+        try:
+            from ... import checkpoint
+        except ImportError:
+            transcript.add_dim("not available in this build")
+            return
+        plural = "" if steps == 1 else "s"
+        confirmed = await self.push_screen_wait(
+            ConfirmScreen("undo", {}, f"revert the last {steps} turn{plural}?"))
+        if not confirmed:
+            transcript.add_dim("undo cancelled")
+            return
+        note = await asyncio.to_thread(checkpoint.undo, self.sess.id, steps, cwd=self.sess.cwd)
+        transcript.add_dim(note)
+
+    async def _diff(self) -> None:
+        transcript = self.query_one(Transcript)
+        try:
+            from ... import checkpoint
+        except ImportError:
+            transcript.add_dim("not available in this build")
+            return
+        text = await asyncio.to_thread(checkpoint.diff, self.sess.id, cwd=self.sess.cwd)
+        await self.push_screen_wait(DiffScreen(None, "checkpoint diff", diff_text=text))
+
+    async def _verify(self) -> None:
+        transcript = self.query_one(Transcript)
+        try:
+            from ... import verify
+        except ImportError:
+            transcript.add_dim("not available in this build")
+            return
+        checks = await asyncio.to_thread(verify.detect, self.sess.cwd)
+        if not checks:
+            transcript.add_dim("no checks detected for this project")
+            return
+        results = await asyncio.to_thread(verify.run, checks, self.sess.cwd)
+        ok = all(r.ok for r in results)
+        summary = ", ".join(f"{r.check.name} {'✓' if r.ok else '✗'}" for r in results)
+        transcript.add_dim(("✓ verified: " if ok else "✗ verification failed: ") + summary)
+
+    async def _pick_session(self) -> None:
+        transcript = self.query_one(Transcript)
+        rows = [s for s in session.all_sessions() if s.cwd == self.sess.cwd and s.id != self.sess.id][:20]
+        if not rows:
+            transcript.add_dim("no other sessions for this directory")
+            return
+        chosen = await self.push_screen_wait(SessionsScreen(rows))
+        if chosen:
+            self._resume_session(chosen)
+
+    def _resume_session(self, sid: str) -> None:
+        new_sess = session.load(sid)
+        self.sess = new_sess
+        self.mode = new_sess.mode
+        self.history.clear()
+        self.history.extend(new_sess.history)
+        self.model_alias = new_sess.model_override
+        self._usage = None
+        self._usage_totals = {}
+        self._last_model = None
+        transcript = self.query_one(Transcript)
+        transcript.set_session(new_sess.id)
+        turns = sum(1 for m in self.history if m.get("role") == "user")
+        ago = format.relative_age(time.time() - new_sess.updated) if new_sess.updated else ""
+        transcript.add_resumed(new_sess.id, turns, len(self.history), new_sess.cwd, ago)
+        self.query_one(Sidebar).session_tab.set_session(new_sess)
+        self._apply_mode_style()
+        self._refresh_status()
+        self._refresh_header(force=True)
 
     async def _pick_model(self) -> None:
         alias = await self.push_screen_wait(ModelPickerScreen(self.cfg.models, self.model_alias))

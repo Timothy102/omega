@@ -8,12 +8,18 @@ from rich.markdown import Markdown
 from rich.syntax import Syntax
 from textual.widgets import Input, Static
 
-from omega import artifacts, events, gitlog, loop, session
+from omega import artifacts, compact, events, gitlog, loop, session
 from omega.config import Model
 from omega.ui import tui
 from omega.ui.tui import app as app_module
 from omega.ui.tui import prefs
-from omega.ui.tui.modals import AskUserScreen, ConfirmScreen, DiffScreen, ModelPickerScreen
+from omega.ui.tui.modals import (
+    AskUserScreen,
+    ConfirmScreen,
+    DiffScreen,
+    ModelPickerScreen,
+    SessionsScreen,
+)
 from omega.ui.tui.sidebar import ConnectionsTab, GitTab, Sidebar
 from omega.ui.tui.status import StatusBar
 from omega.ui.tui.transcript import Transcript, _MoreLine
@@ -596,3 +602,341 @@ async def test_more_line_is_focusable_and_expands_via_action(monkeypatch):
 
         blob = "\n".join(_texts(app.query_one(Transcript)))
         assert "file4.py" in blob
+
+
+@pytest.mark.asyncio
+async def test_cost_command_shows_tokens_and_price_by_model(monkeypatch):
+    app = make_app()
+
+    async def fake_run_turn(cfg, history, mode, emit, model=None):
+        emit(events.ModelUsed(alias="haiku", model="claude-haiku-4-5", provider="anthropic"))
+        emit(events.Usage(prompt_tokens=1000, completion_tokens=200, used=1200, limit=200_000))
+        emit(events.Done("ok"))
+        history.append({"role": "assistant", "content": "ok"})
+
+    monkeypatch.setattr(loop, "run_turn", fake_run_turn)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "go"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: app._turn_worker is None)
+
+        prompt.value = "/cost"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "haiku" in blob
+        assert "1000 in" in blob and "200 out" in blob
+        assert "$0.0020" in blob
+
+
+@pytest.mark.asyncio
+async def test_cost_command_with_no_usage_yet():
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/cost"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "no usage yet this session" in blob
+
+
+@pytest.mark.asyncio
+async def test_export_command_writes_markdown_and_prints_path(tmp_path):
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        app.history.append({"role": "user", "content": "hello there"})
+        target = tmp_path / "out.md"
+        prompt.value = f"/export {target}"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert target.exists()
+        assert "hello there" in target.read_text()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert str(target) in blob
+
+
+@pytest.mark.asyncio
+async def test_compact_command_triggers_and_shows_the_note(monkeypatch):
+    app = make_app()
+
+    async def fake_maybe_compact(cfg, history, used, limit, **kw):
+        assert used == limit
+        return "compacted 4 messages → summary"
+
+    monkeypatch.setattr(compact, "maybe_compact", fake_maybe_compact)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/compact"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "compacted 4 messages" in blob
+
+
+@pytest.mark.asyncio
+async def test_compact_command_reports_nothing_to_compact(monkeypatch):
+    app = make_app()
+
+    async def fake_maybe_compact(cfg, history, used, limit, **kw):
+        return None
+
+    monkeypatch.setattr(compact, "maybe_compact", fake_maybe_compact)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/compact"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "nothing to compact" in blob
+
+
+@pytest.mark.asyncio
+async def test_undo_confirms_then_calls_checkpoint_undo(monkeypatch):
+    from omega import checkpoint
+
+    calls = []
+
+    def fake_undo(session_id, steps, cwd=None):
+        calls.append((session_id, steps, cwd))
+        return "reverted the last 1 turn"
+
+    monkeypatch.setattr(checkpoint, "undo", fake_undo)
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/undo"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        await pilot.press("y")
+        await _wait_for(pilot, lambda: bool(calls))
+
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "reverted the last 1 turn" in blob
+        assert calls[0][1] == 1
+
+
+@pytest.mark.asyncio
+async def test_undo_with_n_steps_is_parsed_and_cancel_skips_checkpoint(monkeypatch):
+    from omega import checkpoint
+
+    calls = []
+    monkeypatch.setattr(checkpoint, "undo", lambda *a, **k: calls.append(a) or "x")
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/undo 3"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen))
+        # The confirm dialog itself names the step count -- check it while
+        # still open, since its content is gone once dismissed.
+        assert "3" in "\n".join(_texts(app.screen))
+        await pilot.press("n")
+        await pilot.pause()
+
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "undo cancelled" in blob
+        assert not calls
+
+
+def _block_relative_import(name: str):
+    """`sys.modules[...] = None` doesn't work here: once `omega.checkpoint`
+    has been imported anywhere in the process, `from ... import checkpoint`
+    resolves via the already-set `checkpoint` attribute on the `omega`
+    package object and never re-consults `sys.modules` at all. Intercepting
+    `__import__` itself is the only way to make the relative import
+    (`level=3`, `fromlist=(name,)`) genuinely fail."""
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(modname, globals=None, locals=None, fromlist=(), level=0):
+        if level == 3 and fromlist and name in fromlist:
+            raise ImportError(f"blocked for this test: {name}")
+        return real_import(modname, globals, locals, fromlist, level)
+    return fake_import
+
+
+@pytest.mark.asyncio
+async def test_undo_not_available_when_checkpoint_module_is_missing(monkeypatch):
+    monkeypatch.setattr("builtins.__import__", _block_relative_import("checkpoint"))
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/undo"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "not available in this build" in blob
+
+
+@pytest.mark.asyncio
+async def test_verify_not_available_when_verify_module_is_missing(monkeypatch):
+    monkeypatch.setattr("builtins.__import__", _block_relative_import("verify"))
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/verify"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "not available in this build" in blob
+
+
+@pytest.mark.asyncio
+async def test_diff_command_opens_diffscreen_with_checkpoint_diff(monkeypatch):
+    from omega import checkpoint
+
+    monkeypatch.setattr(checkpoint, "diff", lambda session_id, cwd=None: "--- a/x\n+++ b/x\n+hi there\n")
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/diff"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: isinstance(app.screen, DiffScreen))
+        await _wait_for(pilot, lambda: "hi there" in "\n".join(_texts(app.screen)))
+
+
+@pytest.mark.asyncio
+async def test_verify_command_shows_verified_summary(monkeypatch):
+    from omega import verify
+
+    check = verify.Check(name="pytest", command="pytest -q", kind="test")
+    result = verify.Result(check=check, ok=True, exit_code=0, tail="")
+    monkeypatch.setattr(verify, "detect", lambda cwd: [check])
+    monkeypatch.setattr(verify, "run", lambda checks, cwd, timeout=300: [result])
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/verify"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "✓ verified: pytest ✓" in blob
+
+
+@pytest.mark.asyncio
+async def test_verify_command_no_checks_detected(monkeypatch):
+    from omega import verify
+
+    monkeypatch.setattr(verify, "detect", lambda cwd: [])
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/verify"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "no checks detected" in blob
+
+
+@pytest.mark.asyncio
+async def test_sessions_command_lists_and_resumes(tmp_path):
+    app = make_app()
+    other = session.Session.new(cwd=app.sess.cwd)
+    other.history = [{"role": "user", "content": "earlier task"}]
+    other.save()
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/sessions"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: isinstance(app.screen, SessionsScreen))
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: app.sess.id == other.id)
+
+        assert app.history[-1] == {"role": "user", "content": "earlier task"}
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "resumed" in blob
+
+
+@pytest.mark.asyncio
+async def test_sessions_command_reports_when_none_for_this_directory():
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/sessions"
+        await pilot.press("enter")
+        await pilot.pause()
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "no other sessions" in blob
+
+
+@pytest.mark.asyncio
+async def test_emit_renders_checkpoint_verified_job_events(monkeypatch):
+    app = make_app()
+
+    async def fake_run_turn(cfg, history, mode, emit, model=None):
+        emit(events.Checkpoint(turn=1, id="cp1"))
+        emit(events.Verified(results_summary="pytest ok", ok=True))
+        emit(events.Verified(results_summary="pytest failed", ok=False))
+        emit(events.JobStarted(id="j1", command="sleep 1"))
+        emit(events.JobFinished(id="j1", exit_code=0))
+        emit(events.Done("done"))
+        history.append({"role": "assistant", "content": "done"})
+
+    monkeypatch.setattr(loop, "run_turn", fake_run_turn)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "go"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: app._turn_worker is None)
+
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "checkpoint" in blob
+        assert "verified: pytest ok" in blob
+        assert "verification failed: pytest failed" in blob
+        assert "job j1 started" in blob
+        assert "job j1 finished (exit 0)" in blob
+
+
+@pytest.mark.asyncio
+async def test_emit_survives_a_render_error_and_shows_a_marker(monkeypatch):
+    app = make_app()
+    monkeypatch.setattr(Transcript, "add_text_delta",
+                        lambda self, text: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    async def fake_run_turn(cfg, history, mode, emit, model=None):
+        emit(events.TextDelta("hi"))
+        emit(events.Done("hi"))
+        history.append({"role": "assistant", "content": "hi"})
+
+    monkeypatch.setattr(loop, "run_turn", fake_run_turn)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "go"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: app._turn_worker is None)
+
+        blob = "\n".join(_texts(app.query_one(Transcript)))
+        assert "render error" in blob
+        assert "RuntimeError" in blob

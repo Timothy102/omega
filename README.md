@@ -150,6 +150,11 @@ omega "list my Linear issues"      # connects enabled MCP servers lazily
 omega --mcp "..."                  # or connect everything eagerly at startup
 omega --yolo "..."                 # skip permission prompts
 omega eval run                     # headless task-suite scoring (see ## Eval harness)
+omega resume [id]                  # resume a session (prefix works; no id -- pick from a list)
+omega continue                     # resume this directory's last session
+omega trace <id> [--tools] [--json]  # print a session's event trace (see ## Observability)
+omega update                       # update omega to the latest release
+omega doctor                       # check your environment and config
 omega --version                    # print the version
 omega --help                       # usage and flags
 ```
@@ -167,6 +172,26 @@ In the TUI: `/plan` and `/build` switch modes, `/model` picks a model,
 the current turn without losing the session, up/down walk input history,
 ctrl-o opens the model picker. Permission prompts and `ask_user` questions
 open as modals — arrow keys and enter, or type a free-text answer.
+
+Session and edit-safety commands (TUI only):
+
+- `/cost` — this session's tokens (in/out/cache) and USD, by model when more
+  than one was used, priced from `omega.eval.prices`.
+- `/export [path]` — writes the transcript as Markdown to `path`, or
+  `~/.omega/sessions/<id>/transcript.md` by default, and prints where it went.
+- `/compact` — forces compaction now instead of waiting for the token
+  threshold, and shows the resulting note.
+- `/undo [n]` — reverts the working tree to the checkpoint from `n` turns ago
+  (default 1), after a y/n/always confirm.
+- `/diff` — shows the working-tree diff since the last checkpoint in a modal.
+- `/verify` — runs this project's auto-detected checks (tests/lint/types) and
+  reports pass/fail per check.
+- `/sessions` — lists this directory's other sessions in a modal; enter
+  resumes the selected one in place, replacing the current history.
+
+`/undo`, `/diff`, and `/verify` depend on `checkpoint.py`/`verify.py`; if
+those aren't present in a build they print a dim "not available in this
+build" instead of erroring.
 
 ## Context and artifacts
 
@@ -329,6 +354,34 @@ context telemetry manifest (per-round token/tool breakdown, system-prompt
 size by zone, and an estimate-vs-actual token drift). Everything lands in
 `.omega/evals/runs/<timestamp>/report.json`, plus a table on stdout.
 
+## Observability
+
+Every event a session's turns emit (`omega/events.py`) — tool calls, model
+switches, compactions, checkpoints, verification, background jobs — is
+appended as one JSON line to `~/.omega/sessions/<id>/trace.jsonl`, regardless
+of what either UI chose to render. It's a second, independent sink: nothing
+about the trace depends on the TUI or plain mode having shown that event.
+
+```bash
+omega trace <id>            # readable timeline: time offset, glyph, summary,
+                             # tool durations, and per-turn token/cost totals
+omega trace <id> --tools    # filter to just ToolStart/ToolEnd
+omega trace <id> --json     # raw JSONL, one event object per line
+```
+
+Each line has the shape `{"t": <epoch>, "turn": <n>, "type": "ToolStart", ...}`
+— `t` and `turn` plus every field of that event's dataclass, flattened. Costs
+are computed from `omega.eval.prices`, matching the alias announced by the
+most recent `ModelUsed` event in that turn.
+
+`omega update` re-installs the current release with `uv tool install --force`
+— from PyPI (`omega-code`) if that's how it was installed, or from
+`git+https://github.com/Timothy102/omega.git@main` if it was installed from
+git — then prints the freshly installed `omega --version`. `omega doctor`
+checks Python ≥3.11, `rg`, `git`, `node`/`npx` (for MCP), `uv`, config
+validity, each configured provider's key presence, and that
+`~/.omega/config.json` is `0600`, as a ✓/✗ table.
+
 ## Development
 
 Uses [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/),
@@ -348,6 +401,9 @@ uv run mypy
 ~/.omega/permissions.json               saved allow/deny rules
 ~/.omega/sessions/                      one JSON file per session
 ~/.omega/sessions/<id>/artifacts/       offloaded tool output + saved artifacts
+~/.omega/sessions/<id>/trace.jsonl      per-event trace (see ## Observability)
+~/.omega/sessions/<id>/transcript.md    `/export`'s default output path
+~/.omega/sessions/<id>/checkpoints.json working-tree checkpoints (`/undo`, `/diff`)
 ~/.omega/memory/memory.db               global memory (SQLite + FTS5)
 <project>/.omega/memory.db              project memory (gitignored)
 ~/.omega/history                        REPL input history

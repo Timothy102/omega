@@ -1,8 +1,9 @@
 import asyncio
+import os
 import sys
 from typing import Any
 
-from . import config, mcp, migrate, session, skills, subagent, tools
+from . import config, mcp, migrate, session, skills, subagent, tools, trace
 from .config import Config
 from .memory import consolidate
 from .ui import plain
@@ -62,6 +63,25 @@ async def main() -> None:
     if argv and argv[0] == "eval":
         from .eval import cli as eval_cli
         return await eval_cli.main(argv[1:])
+    if argv and argv[0] == "trace":
+        return _trace(argv[1:])
+    if argv and argv[0] == "update":
+        return await _update()
+    if argv and argv[0] == "doctor":
+        return _render_doctor()
+
+    # `resume`/`continue` are aliases for `--resume <id>`/`--continue`: rewrite
+    # argv into the flag form and fall through to the normal parsing below so
+    # every downstream behaviour (mode, model, MCP) stays in one place. Both
+    # branches either `return` or produce a recognized `--resume`/`--continue`
+    # flag -- the token can never fall through and become literal prompt text.
+    if argv and argv[0] == "resume":
+        rewritten = await _resume_command(argv[1:])
+        if rewritten is None:
+            return
+        argv = rewritten
+    if argv and argv[0] == "continue":
+        argv = ["--continue", *argv[1:]]
 
     # Parse every flag up front so order never matters.
     flags = {a for a in argv if a.startswith("-")}
@@ -182,6 +202,124 @@ async def main() -> None:
     console.print("[dim]omega: no prompt given and not an interactive terminal[/dim]")
 
 
+async def _resume_command(rest: list[str]) -> list[str] | None:
+    """`omega resume [id]`. With an id (or prefix), rewrite to `--resume
+    <id> ...` and let the caller fall through to the normal flow. With none,
+    list this directory's sessions and, on a TTY, offer a numbered pick --
+    returns None once this call has fully handled the request (nothing left
+    to resume, or the user cancelled)."""
+    if rest and not rest[0].startswith("-"):
+        return ["--resume", rest[0], *rest[1:]]
+
+    cwd = os.getcwd()
+    rows = [s for s in session.all_sessions() if s.cwd == cwd][:20]
+    if not rows:
+        console.print("[dim]no sessions for this directory[/dim]")
+        return None
+    console.print(session.render_list(cwd=cwd))
+    if not sys.stdin.isatty():
+        return None
+    try:
+        answer = (await asyncio.to_thread(
+            input, "resume which? (number, blank to cancel): ")).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not answer.isdigit():
+        return None
+    idx = int(answer) - 1
+    if not (0 <= idx < len(rows)):
+        return None
+    return ["--resume", rows[idx].id, *rest]
+
+
+def _trace(argv: list[str]) -> None:
+    if not argv:
+        return console.print("[red]usage: omega trace <session-id> [--tools] [--json][/red]")
+    sess = session.load(argv[0])
+    text = trace.render_timeline(sess.id, tools_only="--tools" in argv[1:],
+                                 raw_json="--json" in argv[1:])
+    console.print(text, markup="--json" not in argv[1:], highlight=False)
+
+
+async def _run(cmd: list[str], *, merge_stderr: bool = False) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE)
+    out, _ = await proc.communicate()
+    return out.decode(errors="replace")
+
+
+def _installed_from_pypi(tool_list: str) -> bool:
+    """`uv tool list --show-version-specifiers` prints e.g.
+    `omega-code v0.3.0 [required:  git+https://github.com/...]` for a git
+    install, and no `[required: ...]` annotation for a PyPI one. Defaults to
+    the PyPI path when `omega-code` isn't a `uv tool` at all."""
+    for line in tool_list.splitlines():
+        if line.startswith("omega-code"):
+            return "git+" not in line
+    return True
+
+
+async def _update() -> None:
+    listing = await _run(["uv", "tool", "list", "--show-version-specifiers"])
+    target = "omega-code" if _installed_from_pypi(listing) \
+        else "git+https://github.com/Timothy102/omega.git@main"
+    console.print(f"[dim]uv tool install --force {target}[/dim]")
+    install_out = await _run(["uv", "tool", "install", "--force", target], merge_stderr=True)
+    console.print(install_out, markup=False, highlight=False)
+    try:
+        new_version = await _run(["omega", "--version"])
+    except FileNotFoundError:
+        new_version = f"omega {_version()}"
+    console.print(new_version.strip() or f"omega {_version()}")
+
+
+def _doctor_checks() -> list[tuple[str, bool, str]]:
+    """(label, ok, detail) rows for `omega doctor`."""
+    import shutil
+    import stat
+
+    rows: list[tuple[str, bool, str]] = []
+    py_ok = sys.version_info >= (3, 11)
+    rows.append(("python >= 3.11", py_ok, f"{sys.version_info.major}.{sys.version_info.minor}"))
+
+    for tool in ("rg", "git", "node", "npx", "uv"):
+        path = shutil.which(tool)
+        rows.append((tool, path is not None, path or "not found"))
+
+    cfg_ok, cfg_detail = True, "no config file yet"
+    cfg: Config | None = None
+    if config.CONFIG_PATH.exists():
+        try:
+            cfg = config.load()
+            cfg_detail = f"{len(cfg.models)} models, {len(cfg.providers)} providers"
+        except Exception as e:
+            cfg_ok, cfg_detail = False, f"{type(e).__name__}: {e}"
+    rows.append(("config valid", cfg_ok, cfg_detail))
+
+    if cfg is not None:
+        for name, provider in sorted(cfg.providers.items()):
+            rows.append((f"provider key: {name}", provider.has_key,
+                        "set" if provider.has_key else "missing"))
+
+    if config.CONFIG_PATH.exists():
+        mode = stat.S_IMODE(config.CONFIG_PATH.stat().st_mode)
+        rows.append(("config permissions (0600)", mode == 0o600, oct(mode)))
+
+    return rows
+
+
+def _render_doctor() -> None:
+    from rich.table import Table
+    table = Table(box=None)
+    for col in ("CHECK", "", "DETAIL"):
+        table.add_column(col)
+    for label, ok, detail in _doctor_checks():
+        mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        table.add_row(label, mark, detail)
+    console.print(table)
+
+
 def _version() -> str:
     import importlib.metadata
     try:
@@ -198,11 +336,16 @@ def _usage_text() -> str:
         "  omega <subcommand> [args]\n\n"
         "subcommands:\n"
         "  sessions                list saved sessions\n"
+        "  resume [id]              resume a session (prefix works; no id -- pick from a list)\n"
+        "  continue                 resume this directory's last session\n"
         "  models                   show the model catalog and role defaults\n"
         "  skills                   list available skills\n"
         "  memory gc                consolidate memory now\n"
         "  connections [...]        manage MCP servers\n"
         "  eval [...]               run the eval harness (see `omega eval --help`)\n"
+        "  trace <id>               print a session's event trace (--tools, --json)\n"
+        "  update                   update omega to the latest release\n"
+        "  doctor                   check your environment and config\n"
         "  setup                    browser-based setup wizard\n"
         "  onboard                  terminal setup wizard\n\n"
         "flags:\n"

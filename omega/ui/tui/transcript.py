@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from rich.markdown import Markdown
 from rich.markup import escape
@@ -292,7 +293,7 @@ class Transcript(VerticalScroll):
         self._hide_empty_state()
         self._ensure_gap("user")
         width = (self.size.width or 78) - 4
-        left = f"[bold]›[/bold] {escape(text)}  [dim]{mode}[/dim]"
+        left = f"[bold]›[/bold] {format.esc(text)}  [dim]{mode}[/dim]"
         ts = time.strftime("%H:%M")
         self._mount_widget(_PromptBand(format.right_align(left, f"[dim]{ts}[/dim]", width)))
 
@@ -302,8 +303,8 @@ class Transcript(VerticalScroll):
             self._live_text = ""
             self._live_assistant = self._append("")
         self._live_text += text
-        # Model text is data, not markup: a stray "[/x]" must never raise.
-        self._live_assistant.update(f"●  {escape(self._live_text)}")
+        # Model text is data, not markup -- a stray "[/x]" must never raise.
+        self._live_assistant.update(f"●  {format.esc(self._live_text)}")
 
     def finalize_turn(self, text: str) -> None:
         self._stop_status()
@@ -339,7 +340,7 @@ class Transcript(VerticalScroll):
         is_error = outcome.startswith("→ error")
         sub = outcome[2:] if outcome.startswith("→ ") else outcome
         color = "red" if is_error else "dim"
-        return f"  [{color}]└ {sub}[/{color}]"
+        return f"  [{color}]└ {format.esc(sub)}[/{color}]"
 
     def add_tool_start(self, ev: events.ToolStart) -> None:
         if ev.name == "subagent":
@@ -466,8 +467,27 @@ class Transcript(VerticalScroll):
     def add_resumed(self, session_id: str, turns: int, messages: int, cwd: str, ago: str = "") -> None:
         self._ensure_gap("other")
         suffix = f", last active {ago} ago" if ago else ""
-        self._append(f"[dim]resumed {session_id} — {turns} turns, {messages} messages{suffix} · {cwd}[/dim]")
+        self._append(f"[dim]resumed {format.esc(session_id)} — {turns} turns, {messages} messages"
+                     f"{suffix} · {format.esc(cwd)}[/dim]")
 
     def add_dim(self, text: str) -> None:
         self._ensure_gap("other")
-        self._append(f"[dim]{text}[/dim]")
+        self._append(f"[dim]{format.esc(text)}[/dim]")
+
+    # ---- B1's edit-safety events (guarded in app.py -- see format.py) ------
+
+    def add_checkpoint(self, ev: Any) -> None:
+        self._ensure_gap("other")
+        self._append(format.checkpoint(ev))
+
+    def add_verified(self, ev: Any) -> None:
+        self._ensure_gap("other")
+        self._append(format.verified(ev))
+
+    def add_job_started(self, ev: Any) -> None:
+        self._ensure_gap("other")
+        self._append(format.job_started(ev))
+
+    def add_job_finished(self, ev: Any) -> None:
+        self._ensure_gap("other")
+        self._append(format.job_finished(ev))

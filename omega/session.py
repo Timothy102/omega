@@ -180,9 +180,14 @@ def latest(cwd: str | None = None) -> Session | None:
     return here[0] if here else None
 
 
-def render_list(limit: int = 20) -> str:
-    """One session per line: wrapped rows make the list unparseable."""
-    rows = all_sessions()[:limit]
+def render_list(limit: int = 20, cwd: str | None = None) -> str:
+    """One session per line: wrapped rows make the list unparseable. `cwd`
+    filters to that directory's sessions only (used by `omega resume` with
+    no id, and `sessions --resume`'s hint)."""
+    rows = all_sessions()
+    if cwd is not None:
+        rows = [s for s in rows if s.cwd == cwd]
+    rows = rows[:limit]
     if not rows:
         return "no sessions yet"
     now = time.time()

@@ -71,7 +71,7 @@ def _files_block(files: dict[str, set[str]], limit: int = 15) -> str:
     for path, kinds in list(files.items())[:limit]:
         mark = "".join(sorted(kinds))
         color = "yellow" if "W" in kinds else "cyan"
-        rows.append(f"[{color}]{mark}[/{color}] [dim]{path}[/dim]")
+        rows.append(f"[{color}]{mark}[/{color}] [dim]{format.esc(path)}[/dim]")
     more = len(files) - limit
     text = "\n".join(rows)
     if more > 0:
@@ -88,6 +88,10 @@ class SessionTab(VerticalScroll):
         self._tool_session: Counter[str] = Counter()
         self._files_turn: dict[str, set[str]] = {}
         self._files_session: dict[str, set[str]] = {}
+        # call_id -> (path, R/W), committed into the files dicts above only on
+        # a non-error ToolEnd -- a failed read/write must not show up as a
+        # file "touched" this turn.
+        self._pending_files: dict[str, tuple[str, str]] = {}
         self._subagents_turn: list[tuple[str, str]] = []
         self._sub_start: dict[str, float] = {}
         self._memory_recalls = 0
@@ -108,8 +112,15 @@ class SessionTab(VerticalScroll):
     def reset_turn(self) -> None:
         self._tool_turn.clear()
         self._files_turn.clear()
+        self._pending_files.clear()
         self._subagents_turn.clear()
         self._repaint()
+
+    def set_session(self, sess: session.Session) -> None:
+        """`/sessions`: point this tab at a freshly resumed session -- turn
+        and file trackers reset since they describe the OLD session's turn."""
+        self._sess = sess
+        self.reset_turn()
 
     def record_model(self, alias: str | None, model: str) -> None:
         self._last_model = (alias, model)
@@ -124,13 +135,7 @@ class SessionTab(VerticalScroll):
         self._tool_session[ev.name] += 1
         path = _extract_path(ev.name, ev.args_preview)
         if path:
-            kind = "R" if ev.name == "read" else "W"
-            for bucket in (self._files_turn, self._files_session):
-                bucket.setdefault(path, set()).add(kind)
-            if kind == "W":
-                expanded = Path(path).expanduser()
-                absolute = expanded if expanded.is_absolute() else Path(self._sess.cwd) / expanded
-                self._touched.add(str(absolute.resolve()))
+            self._pending_files[ev.call_id] = (path, "R" if ev.name == "read" else "W")
         if ev.name == "call_tool":
             server = _extract_mcp_server(ev.args_preview)
             if server:
@@ -144,6 +149,15 @@ class SessionTab(VerticalScroll):
     def record_tool_end(self, ev: events.ToolEnd) -> None:
         if ev.offloaded:
             self._artifacts += 1
+        pending = self._pending_files.pop(ev.call_id, None)
+        if pending is not None and not ev.outcome.startswith("→ error"):
+            path, kind = pending
+            for bucket in (self._files_turn, self._files_session):
+                bucket.setdefault(path, set()).add(kind)
+            if kind == "W":
+                expanded = Path(path).expanduser()
+                absolute = expanded if expanded.is_absolute() else Path(self._sess.cwd) / expanded
+                self._touched.add(str(absolute.resolve()))
         self._repaint()
 
     def record_subagent_spawned(self, ev: events.SubagentSpawned) -> None:
@@ -164,17 +178,21 @@ class SessionTab(VerticalScroll):
 
         lines = [header, f"[dim]tokens {used}/{limit} · {self._sess.turns} turns[/dim]", ""]
         lines.append(_section("this turn", width))
-        lines.append(_chips(self._tool_turn))
-        lines.append("[dim]FILES[/dim]")
-        lines.append(_files_block(self._files_turn))
+        if self._tool_turn:
+            lines.append(_chips(self._tool_turn))
+        if self._files_turn:
+            lines.append("[dim]FILES[/dim]")
+            lines.append(_files_block(self._files_turn))
+        if not self._tool_turn and not self._files_turn:
+            lines.append("[dim](none yet)[/dim]")
         for sid, tier in self._subagents_turn:
             started = self._sub_start.get(sid)
             if started is not None:
                 elapsed = time.monotonic() - started
                 frame = SPINNER_FRAMES[int(elapsed / 0.08) % len(SPINNER_FRAMES)]
-                lines.append(f"[dim]{frame} {tier} · {sid} · {elapsed:.0f}s[/dim]")
+                lines.append(f"[dim]{frame} {format.esc(tier)} · {format.esc(sid)} · {elapsed:.0f}s[/dim]")
             else:
-                lines.append(f"[green]✓[/green] [dim]{tier} · {sid}[/dim]")
+                lines.append(f"[green]✓[/green] [dim]{format.esc(tier)} · {format.esc(sid)}[/dim]")
 
         if self._tool_turn != self._tool_session or self._files_turn != self._files_session:
             lines.append("")
@@ -206,7 +224,7 @@ class _ChangeRow(Static, can_focus=True):
         elif change.status == "A" and change.added:
             counts = f"  [dim]+{change.added}[/dim]"
         mark = " [$accent]●[/$accent]" if touched else ""
-        super().__init__(f"[{color}]{change.status}[/{color}]  {change.path}{counts}{mark}")
+        super().__init__(f"[{color}]{change.status}[/{color}]  {format.esc(change.path)}{counts}{mark}")
         self.repo = repo
         self.path = change.path
 
@@ -238,7 +256,7 @@ class GitTab(VerticalScroll):
         repos = await gitlog.discover_repos_async(Path(self._cwd))
         await self.remove_children()
         if not repos:
-            self.mount(Static(f"[dim]no git repositories under {self._cwd}[/dim]"))
+            self.mount(Static(f"[dim]no git repositories under {format.esc(self._cwd)}[/dim]"))
             return
         for repo in repos:
             await self._mount_repo(repo)
@@ -247,7 +265,8 @@ class GitTab(VerticalScroll):
         changes = await gitlog.working_tree_async(repo)
         commits = await gitlog.recent_commits_async(repo, limit=10)
         dirty = "  [yellow]●[/yellow] [dim]dirty[/dim]" if repo.dirty else ""
-        self.mount(Static(f"[bold]{repo.name}[/bold]  [dim]{repo.branch}[/dim]{dirty}"))
+        self.mount(Static(f"[bold]{format.esc(repo.name)}[/bold]  "
+                          f"[dim]{format.esc(repo.branch)}[/dim]{dirty}"))
         self.mount(Static("[dim]CHANGES[/dim]"))
         if not changes:
             self.mount(Static("[dim]  (clean)[/dim]"))
@@ -255,7 +274,8 @@ class GitTab(VerticalScroll):
             for change in changes:
                 self.mount(_ChangeRow(repo, change, touched=self._is_touched(repo, change.path)))
         history_body = "\n".join(
-            f"[$accent]{c.short_sha}[/$accent]  [dim]{c.age}  {c.subject}[/dim]" for c in commits
+            f"[$accent]{format.esc(c.short_sha)}[/$accent]  "
+            f"[dim]{format.esc(c.age)}  {format.esc(c.subject)}[/dim]" for c in commits
         ) or "[dim](no commits)[/dim]"
         self.mount(Collapsible(Static(history_body), title="HISTORY", collapsed=True))
 
@@ -288,7 +308,7 @@ class ConnectionsTab(VerticalScroll):
         lines = []
         for name, st in sorted(statuses.items()):
             glyph, color = _STATE_GLYPH.get(st.state, ("●", "dim"))
-            bits = [f"[{color}]{glyph}[/{color}] {name}"]
+            bits = [f"[{color}]{glyph}[/{color}] {format.esc(name)}"]
             if st.state == "connected":
                 bits.append(f"[dim]{st.tools} tools[/dim]")
                 if st.last_used:
@@ -296,9 +316,9 @@ class ConnectionsTab(VerticalScroll):
             elif st.state == "configured":
                 bits.append("[dim]connects on first use[/dim]")
             elif st.state == "needs_auth":
-                bits.append(f"[dim]omega connections connect {name}[/dim]")
+                bits.append(f"[dim]omega connections connect {format.esc(name)}[/dim]")
             elif st.state == "error":
-                bits.append(f"[dim]{(st.error or '')[:60]}[/dim]")
+                bits.append(f"[dim]{format.esc((st.error or '')[:60])}[/dim]")
             lines.append("  ".join(bits))
         self._body.update("\n".join(lines))
 

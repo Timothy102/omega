@@ -1,6 +1,8 @@
-"""Modal screens: the permission-confirm prompt and the ask_user dialog."""
+"""Modal screens: the permission-confirm prompt, the ask_user dialog, the
+model/session pickers, and diff/checkpoint views."""
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from rich.syntax import Syntax
@@ -12,8 +14,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ... import events, gitlog, permissions
+from ... import events, gitlog, permissions, session
 from ...config import Model
+from .. import format
 
 _DIALOG_CSS = """
 Vertical#dialog {
@@ -206,7 +209,9 @@ class ModelPickerScreen(ModalScreen[str | None]):
 
 
 class DiffScreen(ModalScreen[None]):
-    """`git diff -- <path>`, opened from a Git-tab change row."""
+    """`git diff -- <path>`, opened from a Git-tab change row -- or, with
+    `diff_text` given directly, `/diff`'s checkpoint diff (no `gitlog` fetch,
+    `repo` unused)."""
 
     DEFAULT_CSS = _DIALOG_CSS + """
     DiffScreen { align: center middle; }
@@ -215,10 +220,11 @@ class DiffScreen(ModalScreen[None]):
     """
     BINDINGS = [Binding("escape", "close", show=False), Binding("q", "close", show=False)]
 
-    def __init__(self, repo: gitlog.Repo, path: str) -> None:
+    def __init__(self, repo: gitlog.Repo | None, path: str, diff_text: str | None = None) -> None:
         super().__init__()
         self._repo = repo
         self._path = path
+        self._diff_text = diff_text
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -226,10 +232,17 @@ class DiffScreen(ModalScreen[None]):
             yield VerticalScroll(Static("[dim]loading…[/dim]"), id="diff-body")
 
     def on_mount(self) -> None:
-        self.run_worker(self._load(), exclusive=True)
+        if self._diff_text is not None:
+            self.run_worker(self._show(self._diff_text), exclusive=True)
+        else:
+            self.run_worker(self._load(), exclusive=True)
 
     async def _load(self) -> None:
+        assert self._repo is not None
         text = await gitlog.diff_async(self._repo, self._path)
+        await self._show(text)
+
+    async def _show(self, text: str) -> None:
         body = self.query_one("#diff-body", VerticalScroll)
         await body.remove_children()
         if not text:
@@ -238,4 +251,41 @@ class DiffScreen(ModalScreen[None]):
         await body.mount(Static(Syntax(text, "diff", theme="monokai", word_wrap=True)))
 
     def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class SessionsScreen(ModalScreen[str | None]):
+    """`/sessions`: pick one of this cwd's recent sessions to resume.
+    Returns the chosen session id, or None on cancel."""
+
+    DEFAULT_CSS = _DIALOG_CSS + """
+    SessionsScreen { align: center middle; }
+    SessionsScreen #sessions-list { height: auto; max-height: 14; margin-top: 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+
+    def __init__(self, sessions: list[session.Session]) -> None:
+        super().__init__()
+        self._sessions = sessions
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("[yellow]Resume a session[/yellow]")
+            yield OptionList(*self._render_options(), id="sessions-list")
+
+    def on_mount(self) -> None:
+        self.query_one("#sessions-list", OptionList).focus()
+
+    def _render_options(self) -> list[Option]:
+        rendered = []
+        for s in self._sessions:
+            ago = format.relative_age(time.time() - s.updated) if s.updated else "?"
+            text = f"{s.id:<22} {ago:>4} ago  {s.turns:>3} turns  {s.first_prompt(50)}"
+            rendered.append(Option(text, id=f"sess-{s.id}"))
+        return rendered
+
+    def on_option_list_option_selected(self, message: OptionList.OptionSelected) -> None:
+        self.dismiss(self._sessions[message.option_index].id)
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

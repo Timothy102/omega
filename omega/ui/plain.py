@@ -3,10 +3,15 @@ from typing import Any
 
 from rich.console import Console
 
-from .. import events, loop, permissions
+from .. import events, loop, permissions, trace
 from ..config import Config
 from ..session import Message, Session
 from . import format
+
+_Checkpoint = getattr(events, "Checkpoint", None)
+_Verified = getattr(events, "Verified", None)
+_JobStarted = getattr(events, "JobStarted", None)
+_JobFinished = getattr(events, "JobFinished", None)
 
 console = Console()
 
@@ -14,9 +19,9 @@ console = Console()
 async def confirm(name: str, args: dict[str, Any], why: str) -> bool:
     detail = str(args.get("command") or args.get("path")
                  or args.get("name") or "")[:200]
-    console.print(f"\n[yellow]⏸  {name}[/yellow] [dim]{why}[/dim]")
+    console.print(f"\n[yellow]⏸  {name}[/yellow] [dim]{format.esc(why)}[/dim]")
     if detail:
-        console.print(f"   [bold]{detail}[/bold]", highlight=False)
+        console.print(f"   [bold]{format.esc(detail)}[/bold]", highlight=False)
     try:
         answer = (await asyncio.to_thread(
             input, "   allow? [y]es / [N]o / [a]lways: ")).strip().lower()
@@ -29,11 +34,11 @@ async def confirm(name: str, args: dict[str, Any], why: str) -> bool:
 
 
 async def ask_user(question: str, options: list[events.Option], multi_select: bool = False) -> str:
-    console.print(f"\n[yellow]?[/yellow] {question}", highlight=False)
+    console.print(f"\n[yellow]?[/yellow] {format.esc(question)}", highlight=False)
     labels = [opt.get("label", "") for opt in options]
     for i, opt in enumerate(options, 1):
         desc = opt.get("description", "")
-        line = f"   {i}. {opt.get('label', '')}" + (f" — {desc}" if desc else "")
+        line = f"   {i}. {format.esc(opt.get('label', ''))}" + (f" — {format.esc(desc)}" if desc else "")
         console.print(line, highlight=False)
     prompt = ("   answer (comma-separated numbers): " if multi_select
               else "   answer: ")
@@ -83,6 +88,14 @@ def render(ev: events.Event) -> None:
             pass
         case events.ModelUsed():
             pass
+        case _ if _Checkpoint is not None and isinstance(ev, _Checkpoint):
+            console.print(format.checkpoint(ev), highlight=False)
+        case _ if _Verified is not None and isinstance(ev, _Verified):
+            console.print(format.verified(ev), highlight=False)
+        case _ if _JobStarted is not None and isinstance(ev, _JobStarted):
+            console.print(format.job_started(ev), highlight=False)
+        case _ if _JobFinished is not None and isinstance(ev, _JobFinished):
+            console.print(format.job_finished(ev), highlight=False)
 
 
 async def run_prompt(cfg: Config, history: list[Message], prompt: str, mode: str,
@@ -90,10 +103,19 @@ async def run_prompt(cfg: Config, history: list[Message], prompt: str, mode: str
     history.append({"role": "user", "content": prompt})
 
     def emit(ev: events.Event) -> None:
-        render(ev)
-        if (sess and isinstance(ev, events.Compacted)
-                and not ev.note.startswith("compaction skipped")):
-            sess.compactions += 1
+        # A rendering bug (an unescaped model string hitting rich's markup
+        # parser, say) must never abort the turn the model is mid-way through
+        # -- log it to the trace and keep going instead of letting it propagate.
+        try:
+            render(ev)
+        except Exception as e:
+            console.print(f"\n[yellow]⚠ render error: {type(e).__name__}: "
+                          f"{format.esc(str(e)[:120])}[/yellow]", highlight=False)
+        if sess:
+            trace.append(sess.id, ev, sess.turns)
+            if (isinstance(ev, events.Compacted)
+                    and not ev.note.startswith("compaction skipped")):
+                sess.compactions += 1
 
     interrupted = False
     try:
@@ -104,11 +126,11 @@ async def run_prompt(cfg: Config, history: list[Message], prompt: str, mode: str
         interrupted = True
         console.print("\n[dim]interrupted[/dim]")
     except Exception as e:
-        console.print(f"\n[red]error:[/red] {type(e).__name__}: {e}")
+        console.print(f"\n[red]error:[/red] {type(e).__name__}: {format.esc(str(e))}")
     finally:
         if sess:
             try:
                 sess.close_turn(history, mode, interrupted)
             except Exception as e:
-                console.print(f"[red]could not save session:[/red] {e}")
+                console.print(f"[red]could not save session:[/red] {format.esc(str(e))}")
     console.print()

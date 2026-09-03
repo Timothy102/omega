@@ -1,3 +1,7 @@
+import io
+
+from rich.console import Console
+
 from omega import events
 from omega.ui import format
 
@@ -56,6 +60,53 @@ def test_tool_end_shows_find_tools_outcome_in_plain_mode():
                         duration_s=0.1, offloaded=False, outcome="→ 3 tools")
     text = format.tool_end(ev)
     assert text is not None and "3 tools" in text
+
+
+def _render_ok(markup: str) -> str:
+    """A `[/x]`-style stray tag raises `rich.errors.MarkupError` when printed
+    with markup parsing on -- this is the exact crash a live session hit."""
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=200)
+    console.print(markup, highlight=False)
+    return buf.getvalue()
+
+
+def test_tool_start_escapes_stray_markup_in_args_preview():
+    ev = events.ToolStart(call_id="c1", name="bash",
+                          args_preview="bash  $ echo [/Short] and [bold] and [[literal")
+    text = format.tool_start(ev)
+    out = _render_ok(text)
+    assert "[/Short]" in out and "[bold]" in out and "[[literal" in out
+
+
+def test_tool_end_escapes_stray_markup_in_outcome():
+    ev = events.ToolEnd(call_id="c1", name="bash", result_preview="ok", duration_s=0.1,
+                        offloaded=False, outcome="→ error: unexpected [/token] here")
+    text = format.tool_end(ev)
+    assert text is not None
+    out = _render_ok(text)
+    assert "[/token]" in out
+
+
+def test_error_escapes_stray_markup_in_message():
+    ev = events.Error(message="boom: got [/x] from provider")
+    out = _render_ok(format.error(ev))
+    assert "[/x]" in out
+
+
+def test_compacted_escapes_stray_markup_in_note():
+    ev = events.Compacted(note="compaction skipped: KeyError('[missing]')")
+    out = _render_ok(format.compacted(ev))
+    assert "[missing]" in out
+
+
+def test_describe_outcome_error_strips_untrusted_wrapper_and_shows_200_chars():
+    text = ('error: <untrusted source="mcp:linear/save_project">\n'
+           '{"error":"invalid_request","message":"' + "x" * 150 + '"}\n</untrusted>')
+    outcome = format.describe_outcome("call_tool", text, 0.1, False, None, len(text))
+    assert "<untrusted" not in outcome and "</untrusted>" not in outcome
+    assert "invalid_request" in outcome
+    assert "x" * 150 in outcome
 
 
 def test_subagent_spawned_hides_id_by_default():
