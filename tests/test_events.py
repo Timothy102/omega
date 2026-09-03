@@ -80,7 +80,7 @@ def test_event_type_alias_covers_all_variants():
                 events.MemoryWrite, events.MemoryConsolidated, events.SubagentSpawned,
                 events.SubagentDone, events.Error, events.Done, events.Usage, events.ModelUsed,
                 events.Phase, events.Fallback, events.Checkpoint, events.Verified,
-                events.JobStarted, events.JobFinished}
+                events.JobStarted, events.JobFinished, events.RetryBlocked}
     assert args == expected
 
 
@@ -120,3 +120,8 @@ def test_job_started_and_finished():
     finished = events.JobFinished(id="a1b2c3", exit_code=0)
     assert started.command == "sleep 1"
     assert finished.exit_code == 0
+
+
+def test_retry_blocked_construction():
+    e = events.RetryBlocked(name="linear:save_project", attempts=2)
+    assert (e.name, e.attempts) == ("linear:save_project", 2)

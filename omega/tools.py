@@ -116,6 +116,17 @@ def offload_info(result: str) -> tuple[bool, str | None]:
     return (bool(m), m.group(1) if m else None)
 
 
+def is_error_result(text: str) -> bool:
+    """Shared with loop.py's repeat-fail guard: a result counts as an error
+    either because run() itself prefixed it with "error: " (a raised
+    exception, a permissions denial, an MCP isError result -- see mcp.py's
+    call()), or because a remote tool's own untrusted payload carries an
+    "error" field even without that prefix."""
+    if text.startswith("error:"):
+        return True
+    return "<untrusted" in text and '"error"' in text
+
+
 def truncate(text: str, limit: int = MAX_OUTPUT) -> str:
     """Head+tail. Head-only loses the end of failing output, which is where the
     error almost always is."""
@@ -381,9 +392,17 @@ async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
                 return (f"error: {call.name} requires confirmation ({why}) but "
                         f"omega is running non-interactively. Re-run without --yolo "
                         f"in a terminal, or narrow the command.")
-            # Serialized: parallel dispatch would interleave prompts.
+            # Serialized: parallel dispatch would interleave prompts. Every
+            # waiter re-decides once it holds the lock -- a sibling call that
+            # was ASK when this one was dispatched may have just answered
+            # "always" and stored an ALLOW rule (permissions.remember), in
+            # which case prompting again for the identical rule is pure noise.
             async with _confirm_lock:
-                ok = await CONFIRM(call.name, args, why)
+                verdict, why = permissions.decide(call.name, args, tainted=TAINTED)
+                if verdict == permissions.DENY:
+                    return (f"error: refused -- {why}. This is a hard limit; do not "
+                            f"retry it or work around it. Tell the user instead.")
+                ok = True if verdict == permissions.ALLOW else await CONFIRM(call.name, args, why)
             if not ok:
                 return "error: denied by user"
 

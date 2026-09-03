@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from omega import tools
+from omega import permissions, tools
 from omega.llm import ToolCall
 
 
@@ -94,3 +94,24 @@ async def test_reading_outside_the_repo_taints_the_turn(tmp_path):
     await tools.run(call("read", path="/etc/hosts", limit=1))
     assert tools.TAINTED
     assert "confirmation" in await tools.run(call("bash", command="echo hi"))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_asks_for_the_same_rule_prompt_only_once():
+    """Regression: both calls computed their ASK verdict before either
+    prompt was answered, so choosing "always" on the first still left the
+    second waiting on its own (stale) prompt instead of reusing the rule."""
+    prompted = []
+
+    async def confirm_always(name, args, why):
+        prompted.append(args["command"])
+        permissions.remember(permissions.rule_for(name, args), permissions.ALLOW)
+        return True
+    tools.CONFIRM = confirm_always
+
+    await asyncio.gather(
+        tools.run(call("bash", command="customcmd one")),
+        tools.run(call("bash", command="customcmd two")),
+    )
+
+    assert len(prompted) == 1

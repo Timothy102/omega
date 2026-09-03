@@ -131,6 +131,15 @@ class JobFinished:
     exit_code: int
 
 
+@dataclass(frozen=True)
+class RetryBlocked:
+    """The harness refused to re-execute a tool call whose exact
+    (name, args) already failed repeatedly with the same error -- see
+    loop.py's per-turn repeat-fail guard."""
+    name: str
+    attempts: int
+
+
 Event = (TextDelta | ToolStart | ToolEnd | Compacted | MemoryWrite |
          MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed | Phase |
-         Fallback | Checkpoint | Verified | JobStarted | JobFinished)
+         Fallback | Checkpoint | Verified | JobStarted | JobFinished | RetryBlocked)
