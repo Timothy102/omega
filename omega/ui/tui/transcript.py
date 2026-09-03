@@ -21,7 +21,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.events import Click
+from textual.events import Click, Resize
 from textual.timer import Timer
 from textual.widgets import Static
 
@@ -167,7 +167,8 @@ class _NewOutputPill(Static):
 class Transcript(VerticalScroll):
     DEFAULT_CSS = """
     Transcript {
-        width: 3fr;
+        width: 1fr;
+        min-width: 40;
         border-right: solid $panel;
         padding: 0 1;
     }
@@ -203,6 +204,13 @@ class Transcript(VerticalScroll):
 
         self._call_widget: dict[str, Static] = {}
         self._call_base: dict[str, str] = {}
+        # The `ToolStart` (and whether its subagent suffix was shown) behind
+        # each currently-visible row's markup, kept so `on_resize` can rebuild
+        # that markup against the pane's new width instead of leaving stale
+        # truncation baked in from whatever width was current when the row
+        # was first mounted.
+        self._call_ev: dict[str, events.ToolStart] = {}
+        self._call_suffix: dict[str, bool] = {}
         self._buffered_end: dict[str, events.ToolEnd] = {}
         self._last_sig: tuple[str, str, str | None] | None = None
         self._last_widget: Static | None = None
@@ -337,7 +345,10 @@ class Transcript(VerticalScroll):
     def add_user_message(self, text: str, mode: str) -> None:
         self._hide_empty_state()
         self._ensure_gap("user")
-        width = (self.size.width or 78) - 4
+        # `content_size` excludes this widget's own padding/border, unlike
+        # `size` (the border box) -- `_PromptBand`'s own `padding: 0 2` is the
+        # remaining `-4` to subtract for the text-safe width inside it.
+        width = (self.content_size.width or 74) - 4
         left = f"[bold]›[/bold] {format.esc(text)}  [dim]{mode}[/dim]"
         ts = time.strftime("%H:%M")
         self._mount_widget(_PromptBand(format.right_align(left, f"[dim]{ts}[/dim]", width)))
@@ -391,8 +402,39 @@ class Transcript(VerticalScroll):
         return f"{lead} +{remaining} more (▸ to expand)[/dim]"
 
     def _detail_width(self) -> int | None:
-        w = self.size.width
-        return max(10, w - 20) if w else None
+        # `content_size` already excludes this widget's own padding/border --
+        # unlike the old `self.size.width` (the border box), it doesn't need
+        # a guessed-at fudge factor to avoid overflow from double-counting
+        # them. The remaining `-24` budget covers the row's own chrome: the
+        # bullet/indent, the (never-truncated) name column for the handful of
+        # tool names longer than `pad_name`'s 12-column default, and a small
+        # margin of safety.
+        w = self.content_size.width
+        return max(10, w - 24) if w else None
+
+    def on_resize(self, event: Resize) -> None:
+        self._retruncate_tool_rows()
+
+    def _retruncate_tool_rows(self) -> None:
+        """Rebuilds every currently-visible tool row's markup against the
+        pane's new width -- without this, a row's `truncate_middle` cutoff
+        stays fixed at whatever width was current when it was first mounted,
+        so shrinking the pane (a live resize, or the sidebar opening) leaves
+        rows wrapping across extra lines instead of re-truncating to fit, and
+        growing it back leaves them stuck short of what would now fit."""
+        width = self._detail_width()
+        for call_id, widget in self._call_widget.items():
+            ev = self._call_ev.get(call_id)
+            if ev is None:
+                continue
+            show_suffix = self._call_suffix.get(call_id, True)
+            markup = format.tool_start(ev, show_subagent_suffix=show_suffix, width=width)
+            self._call_base[call_id] = markup
+            if widget is self._last_widget and self._last_repeat > 1:
+                self._last_base = markup
+                widget.update(f"{markup}  [dim]×{self._last_repeat}[/dim]")
+            else:
+                widget.update(markup)
 
     def _outcome_line(self, outcome: str, *, full: bool = False) -> str:
         is_error = outcome.startswith("→ error")
@@ -423,6 +465,8 @@ class Transcript(VerticalScroll):
             self._last_widget.update(f"{self._last_base}  [dim]×{self._last_repeat}[/dim]")
             self._call_widget[ev.call_id] = self._last_widget
             self._call_base[ev.call_id] = self._last_base
+            self._call_ev[ev.call_id] = ev
+            self._call_suffix[ev.call_id] = key is None or len(self._active_subagents) > 1
             return
 
         group = self._group_for(key)
@@ -437,6 +481,8 @@ class Transcript(VerticalScroll):
             widget = self._append(markup)
             self._call_widget[ev.call_id] = widget
             self._call_base[ev.call_id] = markup
+            self._call_ev[ev.call_id] = ev
+            self._call_suffix[ev.call_id] = show_suffix
             self._last_sig, self._last_widget, self._last_base, self._last_repeat = sig, widget, markup, 1
         else:
             group.hidden.append(ev)
@@ -465,6 +511,8 @@ class Transcript(VerticalScroll):
             widget = self._append(markup)
             self._call_widget[start_ev.call_id] = widget
             self._call_base[start_ev.call_id] = markup
+            self._call_ev[start_ev.call_id] = start_ev
+            self._call_suffix[start_ev.call_id] = show_suffix
             end_ev = self._buffered_end.pop(start_ev.call_id, None)
             if end_ev is not None and end_ev.outcome:
                 self._mount_outcome(end_ev.outcome)

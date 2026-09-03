@@ -12,6 +12,7 @@ from typing import Any, cast
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Input, Static
@@ -30,6 +31,11 @@ from .transcript import Transcript
 _MODE_ROLE = {"build": "main", "plan": "plan", "discuss": "discuss"}
 _MODE_TAG_STYLE = {"build": "dim", "plan": "yellow", "discuss": "$accent"}
 _MODE_CYCLE = ["build", "plan", "discuss"]
+
+# Below this total terminal width the side panel is auto-hidden (regardless
+# of the user's own toggle preference) rather than squeezed down to
+# illegibility -- `Sidebar`'s own `max-width: 40%` still applies above it.
+_MIN_WIDTH_FOR_SIDEBAR = 80
 
 _COMMANDS = ["/plan", "/build", "/discuss", "/mode", "/memory-gc", "/model", "/sidebar",
             "/cost", "/export", "/compact", "/undo", "/diff", "/verify", "/sessions",
@@ -71,18 +77,55 @@ async def _lookup_branch(cwd: str) -> str:
 
 class HeaderBar(Static):
     """The top chrome line: wordmark, cwd, git branch, session id -- all dim
-    but the wordmark (Part R9)."""
+    but the wordmark (Part R9).
+
+    Fixed at `height: 1`, and rich's default word-wrap can push an
+    over-length "word" (an unbroken path has no internal spaces to wrap on)
+    onto a second line wholesale rather than character-cropping it -- with
+    height pinned to 1, that pushed-down line is never shown, so the entire
+    cwd/branch/session tail could silently vanish the moment it didn't fit.
+    Truncating the tail ourselves, from the right, against the bar's actual
+    width keeps this a single guaranteed-fitting line instead."""
 
     DEFAULT_CSS = """
     HeaderBar { height: 1; color: $text-muted; padding: 0 1; }
     """
 
+    _PREFIX = "⌘ omega  "
+
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._cwd = ""
+        self._branch = ""
+        self._session_id = ""
+
     def set_state(self, cwd: str, branch: str, session_id: str) -> None:
-        bits = [format.abbrev_cwd(cwd)]
-        if branch:
-            bits.append(branch)
-        bits.append(session_id)
-        self.update(f"[bold]⌘ omega[/bold]  [dim]{' · '.join(bits)}[/dim]")
+        self._cwd, self._branch, self._session_id = cwd, branch, session_id
+        self._repaint()
+
+    def on_resize(self, event: Resize) -> None:
+        self._repaint()
+
+    def _repaint(self) -> None:
+        # Branch and session id are short and the most useful thing to keep
+        # legible -- only the (already-abbreviated) cwd gets truncated
+        # further when space is tight, rather than right-cropping the whole
+        # joined line and risking the session id being the part that's lost.
+        suffix_bits = [self._branch] if self._branch else []
+        suffix_bits.append(self._session_id)
+        suffix = " · " + " · ".join(suffix_bits)
+        cwd = format.abbrev_cwd(self._cwd)
+        width = self.content_size.width
+        if width:
+            cwd = format.truncate_right(cwd, max(0, width - len(self._PREFIX) - len(suffix)))
+            # Even an unabbreviated branch/session id alone can outrun a very
+            # narrow pane -- a last-resort truncation of the whole tail keeps
+            # this row guaranteed to fit rather than leaning on the engine's
+            # own (ellipsis-less) overflow clipping.
+            tail = format.truncate_right(f"{cwd}{suffix}", width - len(self._PREFIX))
+        else:
+            tail = f"{cwd}{suffix}"
+        self.update(f"[bold]⌘ omega[/bold]  [dim]{format.esc(tail)}[/dim]")
 
 
 class PromptInput(Input):
@@ -181,7 +224,7 @@ class OmegaApp(App[None]):
         # that monkeypatch it before construction are respected.
         from . import HISTORY
         self._input_history = InputHistory(HISTORY)
-        self.query_one(Sidebar).display = self._sidebar_visible
+        self._apply_sidebar_visibility()
         self.query_one(Transcript).set_session(self.sess.id)
         self._refresh_status()
         self._apply_mode_style()
@@ -191,6 +234,24 @@ class OmegaApp(App[None]):
         else:
             self.query_one(Transcript).show_empty_state()
         self.set_focus(self.query_one("#prompt", Input))
+
+    def on_resize(self, event: Resize) -> None:
+        self._apply_sidebar_visibility()
+        self._refresh_status()
+
+    def _apply_sidebar_visibility(self) -> None:
+        """The panel follows the user's own ctrl+b/`/sidebar` preference, but
+        never below `_MIN_WIDTH_FOR_SIDEBAR` total columns -- squeezed into
+        whatever's left of a narrow terminal it stops being readable rather
+        than useful, so it auto-hides there instead (`StatusBar` surfaces a
+        dim hint explaining why, via `_sidebar_auto_hidden`)."""
+        self.query_one(Sidebar).display = self._sidebar_visible and self._sidebar_fits()
+
+    def _sidebar_fits(self) -> bool:
+        return self.size.width >= _MIN_WIDTH_FOR_SIDEBAR
+
+    def _sidebar_auto_hidden(self) -> bool:
+        return self._sidebar_visible and not self._sidebar_fits()
 
     def _show_resumed(self) -> None:
         hist = self.history
@@ -235,7 +296,7 @@ class OmegaApp(App[None]):
         turns = sum(1 for m in self.history if m.get("role") == "user")
         state = StatusState(mode=self.mode, role_name=role_name, model=model, alias=alias,
                             session_id=self.sess.id, turns=turns, usage=self._usage,
-                            phase=self._phase)
+                            phase=self._phase, sidebar_auto_hidden=self._sidebar_auto_hidden())
         self.query_one(StatusBar).set_state(state)
 
     def _schedule_git_refresh(self) -> None:
@@ -551,9 +612,10 @@ class OmegaApp(App[None]):
 
     def action_toggle_sidebar(self) -> None:
         self._sidebar_visible = not self._sidebar_visible
-        self.query_one(Sidebar).display = self._sidebar_visible
+        self._apply_sidebar_visibility()
         self._prefs["sidebar"] = self._sidebar_visible
         prefs.save(self._prefs)
+        self._refresh_status()
 
     def action_show_tab(self, index: int) -> None:
         self.query_one(Sidebar).show_tab(index)

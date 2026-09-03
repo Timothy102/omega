@@ -186,11 +186,10 @@ I = {"type": "integer"}
 @tool("read", "Read a file. Returns numbered lines.",
       {"path": S, "offset": I, "limit": I}, ["path"])
 def _read(path: str, offset: int = 0, limit: int = 2000) -> str:
+    # Files on this machine are the user's own; only remote (MCP) content
+    # taints the turn. Tainting on any read outside cwd meant every worktree
+    # edit session prompted for bash on every turn.
     p = Path(path).expanduser()
-    try:
-        p.resolve().relative_to(Path(os.getcwd()).resolve())
-    except ValueError:
-        set_tainted(True)
     lines = p.read_text(errors="replace").splitlines()
     chosen = lines[offset:offset + limit]
     width = len(str(offset + len(chosen)))

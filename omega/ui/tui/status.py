@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from textual.events import Resize
 from textual.widgets import Static
 
 from ... import events
@@ -24,6 +25,7 @@ class StatusState:
     usage: events.Usage | None
     alias: str | None = None
     phase: str = "idle"
+    sidebar_auto_hidden: bool = False
 
 
 def _fmt_usage(usage: events.Usage | None) -> str:
@@ -44,6 +46,15 @@ def _fmt_cache(usage: events.Usage | None) -> str:
 
 
 HINT_TEXT = "ctrl+b panel · ctrl+o model · shift+tab mode · /help"
+_SIDEBAR_HIDDEN_HINT = "panel hidden <80c · ctrl+o model · shift+tab mode · /help"
+# A much shorter fallback for when the pane is too narrow for even
+# `HINT_TEXT` -- the panel being auto-hidden is worth a nudge on its own,
+# even where the full cheat-sheet hint has already been dropped for space.
+_SIDEBAR_HIDDEN_SHORT_HINT = "panel hidden <80c"
+
+
+def _hint_text(state: StatusState) -> str:
+    return _SIDEBAR_HIDDEN_HINT if state.sidebar_auto_hidden else HINT_TEXT
 
 
 def format_status(state: StatusState, *, width: int | None = None) -> str:
@@ -80,15 +91,24 @@ class StatusBar(Static):
         self._state = state
         self._repaint()
 
+    def on_resize(self, event: Resize) -> None:
+        self._repaint()
+
     def _repaint(self) -> None:
         if self._state is None:
             return
         width = self.size.width or 78
         full = format_status(self._state, width=None).strip()
+        hint = _hint_text(self._state)
         # The status cells always win the space fight -- the hint text is a
         # nice-to-have that only shows up once there's room left over for it.
-        if ui_format.visible_len(full) + len(HINT_TEXT) + 3 <= width:
-            self.update(ui_format.right_align(f"[dim]{full}[/dim]", f"[dim]{HINT_TEXT}[/dim]", width))
+        if ui_format.visible_len(full) + len(hint) + 3 <= width:
+            self.update(ui_format.right_align(f"[dim]{full}[/dim]", f"[dim]{hint}[/dim]", width))
             return
         narrowed = format_status(self._state, width=width).strip()
+        if (self._state.sidebar_auto_hidden
+                and ui_format.visible_len(narrowed) + len(_SIDEBAR_HIDDEN_SHORT_HINT) + 2 <= width):
+            self.update(ui_format.right_align(
+                f"[dim]{narrowed}[/dim]", f"[dim]{_SIDEBAR_HIDDEN_SHORT_HINT}[/dim]", width))
+            return
         self.update(f"[dim]{narrowed}[/dim]")

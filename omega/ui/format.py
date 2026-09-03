@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +31,60 @@ esc = escape
 # ---- paths ---------------------------------------------------------------
 
 
+# Worktrees of the cwd's repo, cached for the life of the process (like
+# `app.py`'s `_branch_cache`) -- `git worktree list` only ever changes between
+# turns, so re-running it on every path we render would be wasteful. Keyed by
+# the cwd it was discovered from, sorted longest-path-first so a nested match
+# resolves to the most specific worktree.
+_worktree_cache: dict[str, list[tuple[Path, str]]] = {}
+
+
+def _discover_worktrees(cwd: str) -> list[tuple[Path, str]]:
+    if cwd in _worktree_cache:
+        return _worktree_cache[cwd]
+    found: list[tuple[Path, str]] = []
+    try:
+        proc = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=cwd, capture_output=True, text=True, timeout=2)
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if line.startswith("worktree "):
+                    wt_path = Path(line[len("worktree "):]).resolve()
+                    found.append((wt_path, wt_path.name))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    found.sort(key=lambda t: len(str(t[0])), reverse=True)
+    _worktree_cache[cwd] = found
+    return found
+
+
+def _worktree_relpath(abs_path: Path) -> str | None:
+    """`⎇ <worktree-name>/<path-within-worktree>` when `abs_path` lives inside
+    one of the cwd repo's git worktrees, else `None`."""
+    for wt_path, name in _discover_worktrees(os.getcwd()):
+        try:
+            rel = abs_path.relative_to(wt_path)
+        except ValueError:
+            continue
+        return f"⎇ {name}" if str(rel) == "." else f"⎇ {name}/{rel}"
+    return None
+
+
+def _tail_segments(path: str, segments: int = 3) -> str:
+    parts = [seg for seg in path.split("/") if seg]
+    if len(parts) <= segments:
+        return "/".join(parts) if parts else path
+    return ".../" + "/".join(parts[-segments:])
+
+
 def relpath(path: str) -> str:
-    """`path` relative to the cwd, or `~`-abbreviated when it's outside the
-    cwd tree -- an absolute path is mostly noise once you know where you are."""
+    """`path` relative to the cwd; when it's outside the cwd tree, rendered as
+    `⎇ <worktree-name>/<path-within-worktree>` if it lives in a sibling git
+    worktree of the cwd's repo, else abbreviated to its last 3 segments -- an
+    absolute path is mostly noise once you know where you are, and a bare
+    `~`-abbreviated absolute path was unreadable for a worktree checkout many
+    directories deep."""
     if not path:
         return path
     try:
@@ -42,11 +94,11 @@ def relpath(path: str) -> str:
         if not rel.startswith(".."):
             return rel
     except (ValueError, OSError):
-        pass
-    home = str(Path.home())
-    if path.startswith(home):
-        return "~" + path[len(home):]
-    return path
+        return path
+    worktree = _worktree_relpath(abs_p)
+    if worktree is not None:
+        return worktree
+    return _tail_segments(str(abs_p))
 
 
 def _truncate(text: Any, limit: int = 60) -> str:
@@ -70,6 +122,19 @@ def truncate_middle(text: str, width: int) -> str:
     left = (keep + 1) // 2
     right = keep - left
     return text[:left] + "…" + (text[-right:] if right else "")
+
+
+def truncate_right(text: str, width: int) -> str:
+    """Cut from the end, keeping the recognizable start -- for chrome lines
+    (header, status) where the most useful information (cwd, mode) comes
+    first and a lost tail is more acceptable than a lost head."""
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return "…"
+    return text[: width - 1] + "…"
 
 
 def fmt_num(n: float) -> str:
@@ -190,6 +255,13 @@ def style_for(name: str) -> str:
 
 # ---- per-tool call descriptions (C9a) --------------------------------------
 
+# Matches the `cd <dir> && ` a model prepends to keep a worktree's shell state
+# -- `describe_call` collapses this boilerplate down to `(in ⎇ name)` when
+# `<dir>` is a git worktree, so a burst of commands in the same worktree reads
+# as the actual command instead of a repeated absolute path.
+_BASH_CD_PREFIX_RE = re.compile(r"^cd\s+(\S+)\s+&&\s+")
+
+
 def describe_call(name: str, args: dict[str, Any]) -> str:
     """What a tool call is actually doing, for `ToolStart.args_preview` --
     shared so plain and the TUI never disagree on the wording."""
@@ -210,6 +282,15 @@ def describe_call(name: str, args: dict[str, Any]) -> str:
         return f"glob  {pattern}  in {path}"
     if name == "bash":
         command = str(get("command") or "").replace("\n", "⏎")
+        cd_match = _BASH_CD_PREFIX_RE.match(command)
+        if cd_match:
+            target = Path(cd_match.group(1)).expanduser()
+            if not target.is_absolute():
+                target = Path(os.getcwd()) / target
+            wt_tag = _worktree_relpath(target)
+            if wt_tag is not None:
+                rest = command[cd_match.end():]
+                return f"bash  $ (in {wt_tag}) {_truncate(rest, 80)}"
         return f"bash  $ {_truncate(command, 80)}"
     if name == "write":
         content = get("content") or ""
@@ -329,13 +410,20 @@ def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True,
                width: int | None = None) -> str:
     style = style_for(ev.name)
     detail = _without_name(ev.name, ev.args_preview)
+    name_col = pad_name(ev.name)
+    if ev.subagent_id:
+        # The tier/id suffix is appended AFTER truncation, not before it --
+        # its own length must come out of `width`'s budget first, or a
+        # subagent row with the suffix shown overflows past the caller's
+        # intended width by however many columns the suffix takes.
+        suffix = f"  ({esc(ev.tier or '')}·{esc(ev.subagent_id)})" if show_subagent_suffix else ""
+        if width is not None:
+            detail = truncate_middle(detail, max(0, width - len(suffix)))
+        detail = esc(detail)
+        return f"  [dim]└ [{style}]{name_col}[/{style}]{detail}{suffix}[/dim]"
     if width is not None:
         detail = truncate_middle(detail, width)
     detail = esc(detail)
-    name_col = pad_name(ev.name)
-    if ev.subagent_id:
-        suffix = f"  ({esc(ev.tier or '')}·{esc(ev.subagent_id)})" if show_subagent_suffix else ""
-        return f"  [dim]└ [{style}]{name_col}[/{style}]{detail}{suffix}[/dim]"
     return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{detail}"
 
 

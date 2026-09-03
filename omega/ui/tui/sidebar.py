@@ -386,7 +386,8 @@ class ConnectionsTab(VerticalScroll):
 class Sidebar(Container):
     DEFAULT_CSS = """
     Sidebar {
-        width: 1fr;
+        width: 34;
+        max-width: 40%;
         background: $panel;
     }
     """

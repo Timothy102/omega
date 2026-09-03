@@ -10,7 +10,11 @@ STORE = Path.home() / ".omega" / "permissions.json"
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 # Never askable: no confirmation prompt makes these safe, and a model that has
-# ingested untrusted content is exactly what would propose them.
+# ingested untrusted content is exactly what would propose them. This floor
+# stays in place even with everything below relaxed to ALLOW -- it guards
+# against catastrophic, irreversible harm (credential theft, wiping the
+# filesystem, running as root), not routine workflow friction, so "drop all
+# permissions" doesn't extend to it without a separate, explicit ask.
 # Both `.omega/config.json` and the pre-rename `.rig/config.json` stay
 # protected -- the old file may still exist (with a key in it) after migration.
 FORBIDDEN_PATHS = ("/.ssh", "/.aws", "/.gnupg", "/.omega/config.json", "/.rig/config.json",
@@ -24,16 +28,6 @@ FORBIDDEN_PATTERNS = [
     (re.compile(r":\(\)\s*\{.*\};\s*:"), "fork bomb"),
     (re.compile(r"\b(shutdown|reboot|mkfs|diskutil\s+erase)\b"), "destructive system command"),
 ]
-
-# Read-only first tokens. Anything not here is ASK, not DENY.
-SAFE_COMMANDS = {
-    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "pwd", "which",
-    "echo", "date", "env", "uname", "whoami", "rg", "grep", "find", "tree",
-    "python3", "python", "node", "jq", "sort", "uniq", "cut", "awk", "sed",
-    "pytest", "npm", "npx", "uv", "pip", "make", "cargo", "go",
-}
-SAFE_GIT = {"status", "diff", "log", "show", "branch", "remote", "rev-parse", "stash"}
-SHELL_META = re.compile(r"[>|]|\$\(|`|&&|;|\|\|")
 
 
 def _load() -> dict[str, list[str]]:
@@ -75,6 +69,10 @@ def _first_token(command: str) -> str:
         return command.strip().split(" ")[0] if command else ""
     if not parts:
         return ""
+    # `cd <dir> && real-command …`: the rule should name the real command,
+    # otherwise every command run from a worktree is classified as "cd".
+    if parts[0] == "cd" and "&&" in parts:
+        parts = parts[parts.index("&&") + 1:] or parts
     if parts[0] == "git" and len(parts) > 1:
         return f"git {parts[1]}"
     return parts[0]
@@ -91,8 +89,15 @@ def _touches_forbidden(text: str) -> str | None:
 
 def decide(name: str, args: dict[str, Any], cwd: str | None = None,
           tainted: bool = False) -> tuple[str, str]:
-    """Returns (verdict, reason). Pure -- no I/O beyond the rules file."""
-    cwd = cwd or os.getcwd()
+    """Returns (verdict, reason). Pure -- no I/O beyond the rules file.
+
+    Everything the model can do to the local filesystem/shell -- write, edit,
+    bash, the git subcommand it runs, whether a path is inside `cwd` -- is
+    ALLOW by default now; only the FORBIDDEN_PATHS/FORBIDDEN_PATTERNS floor
+    above and prompt-injection taint still gate. `call_tool` (any external
+    MCP server, database writes included) is deliberately left unclassified
+    below so it still falls through to ASK -- that's the one category this
+    relaxation does not cover."""
     stored = _load()
     rule = rule_for(name, args)
 
@@ -110,10 +115,7 @@ def decide(name: str, args: dict[str, Any], cwd: str | None = None,
 
     if rule in stored["deny"]:
         return DENY, "denied by a saved rule"
-    # Taint (untrusted content read this turn) only downgrades bash, which is
-    # where a prompt injection could reach the machine. Ignoring saved rules
-    # for everything else made every MCP-heavy turn an endless prompt loop.
-    if rule in stored["allow"] and not (tainted and name == "bash"):
+    if rule in stored["allow"]:
         return ALLOW, "allowed by a saved rule"
 
     if name in ("read", "grep", "glob", "recall", "find_tools", "subagent",
@@ -124,24 +126,12 @@ def decide(name: str, args: dict[str, Any], cwd: str | None = None,
         return ALLOW, "writes to omega's own store (~/.omega or .omega/), not project files"
 
     if name in ("write", "edit"):
-        target = Path(os.path.expanduser(args.get("path", ""))).resolve()
-        try:
-            target.relative_to(Path(cwd).resolve())
-        except ValueError:
-            return ASK, f"writes outside the working directory ({target})"
-        return ALLOW, "writes inside the working directory"
+        return ALLOW, "writes always allowed (permissions relaxed to the filesystem/shell)"
 
     if name == "bash":
-        command = args.get("command", "")
-        first = _first_token(command)
-        if tainted:
-            return ASK, "this turn has read untrusted content"
-        if SHELL_META.search(command):
-            return ASK, "uses redirection, pipes or command substitution"
-        if first.startswith("git "):
-            return (ALLOW, "read-only git") if first.split()[1] in SAFE_GIT \
-                else (ASK, f"git subcommand {first.split()[1]!r}")
-        return (ALLOW, f"{first} is read-only") if first in SAFE_COMMANDS \
-            else (ASK, f"{first!r} is not on the safe list")
+        # The user chose zero prompts over the prompt-injection guard: the
+        # FORBIDDEN floor above is the only thing between untrusted content
+        # and the shell.
+        return ALLOW, "bash always allowed (permissions relaxed to the filesystem/shell)"
 
     return ASK, "not classified"
