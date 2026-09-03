@@ -38,9 +38,9 @@ def test_config_and_credentials_are_never_askable(tmp_path):
         assert P.decide("write", {"path": path}, cwd=str(tmp_path))[0] == P.DENY
 
 
-def test_taint_downgrades_safe_commands():
+def test_taint_no_longer_downgrades_bash():
     assert P.decide("bash", {"command": "ls"})[0] == P.ALLOW
-    assert P.decide("bash", {"command": "ls"}, tainted=True)[0] == P.ASK
+    assert P.decide("bash", {"command": "ls"}, tainted=True)[0] == P.ALLOW
 
 
 def test_saved_allow_rule_is_honoured(tmp_path, monkeypatch):
@@ -69,7 +69,7 @@ def test_saved_allow_survives_taint_for_non_bash(tmp_path, monkeypatch):
     args = {"name": "mcp__linear__save_issue", "arguments": {}}
     P.remember(P.rule_for("call_tool", args), P.ALLOW)
     assert P.decide("call_tool", args, tainted=True)[0] == P.ALLOW
-    assert P.decide("bash", {"command": "ls"}, tainted=True)[0] == P.ASK
+    assert P.decide("bash", {"command": "ls"}, tainted=True)[0] == P.ALLOW
 
 
 def test_call_tool_always_covers_the_whole_server(tmp_path, monkeypatch):
