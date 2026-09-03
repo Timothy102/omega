@@ -29,7 +29,8 @@ token — src/auth.py:88 raises Forbidden instead of Unauthorized.
   85 connected tools cost ~700 tokens instead of ~38,000.
 - **Subagents.** Delegate wide searches to a cheaper model and get back a
   summary, so raw output never enters your main context.
-- **Persistent memory.** Facts the agent should keep, in plain markdown.
+- **Persistent memory.** A local knowledge graph (SQLite + FTS5), scoped per
+  project and globally, with background consolidation.
 
 ## Install
 
@@ -38,7 +39,7 @@ Node (only if you want MCP servers).
 
 ```bash
 git clone https://github.com/Timothy102/rig.git && cd rig
-pip install -e .        # or: uv pip install -e .
+uv tool install .       # puts `rig` on your PATH; or `uv sync` to hack on it
 ```
 
 ## Setup
@@ -66,7 +67,8 @@ Prefer a file? Write `~/.rig/config.json` yourself:
     "plan":          { "model": "big-model",   "provider": "my-provider", "context": 200000 },
     "subagent_fast": { "model": "small-model", "provider": "my-provider", "context": 128000 },
     "subagent_mid":  { "model": "big-model",   "provider": "my-provider", "context": 200000 },
-    "compact":       { "model": "small-model", "provider": "my-provider", "context": 128000 }
+    "compact":       { "model": "small-model", "provider": "my-provider", "context": 128000 },
+    "memory":        { "model": "small-model", "provider": "my-provider", "context": 128000 }
   }
 }
 ```
@@ -83,6 +85,7 @@ The file is written `0600`.
 | `subagent_fast` | bounded lookups — use your quickest model |
 | `subagent_mid` | reasoning across several files |
 | `compact` | summarises old context when the window fills |
+| `memory` | background consolidation of saved memory notes |
 
 ## Usage
 
@@ -138,25 +141,50 @@ run one. Add your own in `~/.rig/config.json`:
 
 ## Memory
 
-The agent can save durable facts with a `remember` tool and search them with
-`recall`. They're markdown files in `~/.rig/memory/`, so edit or delete them
-by hand whenever you like.
+The agent keeps a small local knowledge graph in SQLite (FTS5 full-text search
++ a graph of typed edges), in two scopes:
+
+- **project** — `.rig/memory.db` next to the repo you're in; auto-gitignored
+  the first time it's written, never committed
+- **global** — `~/.rig/memory/memory.db`, shared across all projects
+
+Nodes have a `type` (`fact`, `preference`, `decision`, `entity`, `file_note`,
+`open_question`), a confidence, a volatility, and an importance, which
+together decide what gets auto-injected into the system prompt each session
+vs. what stays recall-only.
+
+Tools: `remember` saves a node; `recall` searches both scopes and expands
+related nodes; `supersede` replaces an outdated node while keeping the old
+one queryable; `link` adds an explicit relation (`contradicts`, `depends_on`,
+`part_of`, ...) between two existing nodes. A regex safety net forces
+`sensitivity="sensitive"` on anything that looks like a secret or PII,
+regardless of what the model passed.
+
+A background pass (the `memory` role) periodically merges near-duplicates,
+flags contradictions, and retags stale entries — automatically at session
+close once 5+ new nodes have accumulated, or on demand with `rig memory gc`
+(`/memory-gc` in the REPL).
 
 ## Development
 
+Uses [uv](https://docs.astral.sh/uv/) and [ruff](https://docs.astral.sh/ruff/).
+
 ```bash
-pip install -e ".[dev]"
-pytest
+uv sync            # creates .venv with dev deps
+uv run pytest
+uv run ruff check
 ```
 
 ## Where things live
 
 ```
-~/.rig/config.json       provider, models, MCP servers   (0600)
-~/.rig/permissions.json  saved allow/deny rules
-~/.rig/sessions/         one JSON file per session
-~/.rig/memory/           saved facts
-~/.rig/history           REPL input history
+~/.rig/config.json                    provider, models, MCP servers   (0600)
+~/.rig/permissions.json               saved allow/deny rules
+~/.rig/sessions/                      one JSON file per session
+~/.rig/sessions/<id>/artifacts/       offloaded tool output + saved artifacts
+~/.rig/memory/memory.db               global memory (SQLite + FTS5)
+<project>/.rig/memory.db              project memory (gitignored)
+~/.rig/history                        REPL input history
 ```
 
 Sessions contain full transcripts, including file contents and command output.

@@ -1,4 +1,7 @@
-import asyncio, json, os, shutil
+import asyncio
+import json
+import os
+import shutil
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -180,7 +183,7 @@ class Server:
             # No shield: shielding guarantees this timeout can never cancel the
             # task it is waiting on, so a hung server leaks its subprocess.
             await asyncio.wait_for(self._task, 10)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
 
@@ -198,7 +201,7 @@ def _register(server: Server, tool) -> str:
         try:
             result = await asyncio.wait_for(
                 server.session.call_tool(tool.name, kwargs), CALL_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return f"error: MCP server {server.name!r} timed out after {CALL_TIMEOUT}s"
         parts = [c.text for c in result.content if getattr(c, "text", None)]
         body = tools.truncate("\n".join(parts) or "(no content)")

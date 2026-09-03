@@ -1,12 +1,17 @@
-import asyncio, json, re, secrets, threading, webbrowser
+import asyncio
+import json
+import re
+import secrets
+import threading
+import webbrowser
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-from . import config, mcp
+from . import config, events, mcp
 
 UI = Path(__file__).parent / "setup.html"
 TOKEN = secrets.token_urlsafe(16)
@@ -161,12 +166,15 @@ def api_agent(body) -> dict:
     """Run one real rig turn so onboarding ends on proof it works."""
     from . import loop
     calls: list = []
+    def emit(ev):
+        if isinstance(ev, events.ToolStart):
+            calls.append(ev.name)
     async def go():
         cfg = config.load()
         history = [{"role": "user", "content": PROBE_PROMPT}]
         text = await loop.run_agent(cfg, "main",
                                     loop.BUILD_SYSTEM, history,
-                                    on_tool=lambda c: calls.append(c.name))
+                                    emit=emit)
         return text
     try:
         return {"ok": True, "text": asyncio.run(go()), "tools": calls}

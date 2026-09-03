@@ -1,22 +1,42 @@
-import asyncio, fnmatch, inspect, os, shutil as _shutil, signal, subprocess, time
+import asyncio
+import inspect
+import os
+import re
+import shutil as _shutil
+import signal
+import subprocess
+import time
 from collections import defaultdict
+from pathlib import Path
 
 from . import permissions
-from pathlib import Path
 
 MAX_OUTPUT = 30000
 REGISTRY: dict = {}
 _locks: dict = defaultdict(asyncio.Lock)
+_OFFLOAD_RE = re.compile(r"saved as artifact ([0-9a-f]{8})")
 
 # Set by the CLI. None means no prompting (scripted / --yolo).
 CONFIRM = None
 _confirm_lock = asyncio.Lock()
 TAINTED = False
 
+# Set by the CLI right after the session is created/loaded. None means no
+# session context (e.g. subagent-only test contexts) -- offload is skipped.
+SESSION_ID: str | None = None
+
+# Set by the CLI. None means no interactive session (scripted / --yolo).
+ASK_USER = None
+
 
 def set_tainted(value: bool):
     global TAINTED
     TAINTED = value
+
+
+def offload_info(result: str) -> tuple[bool, str | None]:
+    m = _OFFLOAD_RE.search(result)
+    return (bool(m), m.group(1) if m else None)
 
 
 def truncate(text: str, limit: int = MAX_OUTPUT) -> str:
@@ -52,7 +72,13 @@ def tool(name, description, params, required, locks_path=None, mutates=False,
     return wrap
 
 
-READ_ONLY = {"read", "grep", "glob", "recall", "subagent", "find_tools", "call_tool"}
+READ_ONLY = {"read", "grep", "glob", "recall", "subagent", "find_tools", "call_tool",
+             "fetch_result", "list_artifacts", "ask_user"}
+
+# Tiny confirmations, or themselves the retrieval path -- offloading
+# fetch_result's own output would be an infinite regress.
+_NO_OFFLOAD = {"write", "edit", "remember", "supersede", "link", "ask_user",
+               "save_artifact", "update_artifact", "fetch_result", "list_artifacts"}
 
 
 def schemas(names=None) -> list:
@@ -218,31 +244,16 @@ async def run(call, allowed=None) -> str:
         lock_key = args.get(entry["locks_path"]) if entry["locks_path"] else None
         if lock_key:
             async with _locks[str(Path(lock_key).expanduser().resolve())]:
-                return await call_it()
-        return await call_it()
+                result = await call_it()
+        else:
+            result = await call_it()
     except Exception as e:
         return f"error: {type(e).__name__}: {e}"
 
-
-@tool("remember",
-      "Save a durable fact about the user or their projects to long-term memory "
-      "so it survives into FUTURE sessions. The current conversation is already "
-      "remembered without this.",
-      {"title": S, "body": S}, ["title", "body"], mutates=True)
-def _remember(title, body):
-    from . import memory
-    return memory.save(title, body)
-
-
-@tool("recall",
-      "Search LONG-TERM memory notes saved across sessions with the `remember` "
-      "tool. This is NOT the conversation: everything said in this session, "
-      "including a resumed one, is already in your context above. Do not call "
-      "this to answer questions about what was just discussed.",
-      {"query": S}, ["query"])
-def _recall(query):
-    from . import memory
-    return truncate(memory.recall(query))
+    if call.name in _NO_OFFLOAD or SESSION_ID is None:
+        return result
+    from . import artifacts
+    return artifacts.offload_if_large(result, SESSION_ID)
 
 
 @tool("find_tools",
@@ -289,3 +300,71 @@ async def _call_tool(name, arguments=None):
     if inspect.iscoroutinefunction(fn):
         return await fn(**args)
     return await asyncio.to_thread(fn, **args)
+
+
+@tool("ask_user",
+      "Ask the user a clarifying question when genuinely blocked on a "
+      "decision only they can make. Do not use it for things you can "
+      "investigate yourself.",
+      {"question": S, "header": S,
+       "options": {"type": "array", "items": {"type": "object",
+                    "properties": {"label": S, "description": S}}},
+       "multi_select": {"type": "boolean"}},
+      ["question"])
+async def _ask_user(question, header="", options=None, multi_select=False):
+    if ASK_USER is None:
+        return ("error: ask_user requires an interactive session; rig is "
+                "running non-interactively. State your assumption and "
+                "proceed instead.")
+    async with _confirm_lock:
+        return await ASK_USER(question, options or [], multi_select)
+
+
+@tool("fetch_result",
+      "Read more of a large tool result that was saved as an artifact -- "
+      "the id is in the `[full output: ... saved as artifact <id>]` footer.",
+      {"id": S, "offset": I, "limit": I}, ["id"])
+def _fetch_result(id, offset=0, limit=4000):
+    if SESSION_ID is None:
+        return "error: no active session"
+    from . import artifacts
+    return artifacts.fetch(SESSION_ID, id, offset, limit)
+
+
+@tool("list_artifacts",
+      "List the artifacts saved so far this session (offloaded tool "
+      "outputs and content saved with save_artifact) -- id, kind, size, title.",
+      {}, [])
+def _list_artifacts():
+    if SESSION_ID is None:
+        return "(no artifacts this session)"
+    from . import artifacts
+    rows = artifacts.list_artifacts(SESSION_ID)
+    if not rows:
+        return "(no artifacts this session)"
+    return "\n".join(f"{r['id']}  {r['kind']}  {r['size']} chars  {r['title']}"
+                     for r in rows)
+
+
+@tool("save_artifact",
+      "Persist long-form content you are building up (a plan, a report) so "
+      "you don't have to re-emit it every turn; returns an id you can update "
+      "later.",
+      {"title": S, "content": S}, ["title", "content"], mutates=True)
+def _save_artifact(title, content):
+    if SESSION_ID is None:
+        return "error: no active session"
+    from . import artifacts
+    artifact_id = artifacts.save(SESSION_ID, content, title=title, kind="authored")
+    return f"saved artifact {artifact_id} ({len(content)} chars)"
+
+
+@tool("update_artifact",
+      "Replace the full content of an artifact you previously created with "
+      "save_artifact (full replace, no diffing).",
+      {"id": S, "content": S}, ["id", "content"], mutates=True)
+def _update_artifact(id, content):
+    if SESSION_ID is None:
+        return "error: no active session"
+    from . import artifacts
+    return artifacts.update(SESSION_ID, id, content)

@@ -5,3 +5,6 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+.rig/
+.DS_Store
+.env

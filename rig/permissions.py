@@ -1,4 +1,7 @@
-import json, os, re, shlex
+import json
+import os
+import re
+import shlex
 from pathlib import Path
 
 STORE = Path.home() / ".rig" / "permissions.json"
@@ -84,7 +87,7 @@ def decide(name: str, args: dict, cwd: str | None = None, tainted=False) -> tupl
     stored = _load()
     rule = rule_for(name, args)
 
-    if name in ("write", "edit", "bash", "call_tool", "remember"):
+    if name in ("write", "edit", "bash", "call_tool", "remember", "supersede", "link"):
         blob = " ".join(str(v) for v in args.values())
         why = _touches_forbidden(blob)
         if why:
@@ -101,8 +104,12 @@ def decide(name: str, args: dict, cwd: str | None = None, tainted=False) -> tupl
     if rule in stored["allow"] and not tainted:
         return ALLOW, "allowed by a saved rule"
 
-    if name in ("read", "grep", "glob", "recall", "find_tools", "subagent"):
+    if name in ("read", "grep", "glob", "recall", "find_tools", "subagent",
+                "fetch_result", "list_artifacts", "ask_user"):
         return ALLOW, "read-only"
+
+    if name in ("save_artifact", "update_artifact", "remember", "supersede", "link"):
+        return ALLOW, "writes to rig's own store (~/.rig or .rig/), not project files"
 
     if name in ("write", "edit"):
         target = Path(os.path.expanduser(args.get("path", ""))).resolve()

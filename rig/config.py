@@ -1,4 +1,6 @@
-import json, os, re
+import json
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +19,7 @@ DEFAULTS = {
         "subagent_fast": {"model": "glm-5.3-flash", "provider": "inference-net", "context": 128000},
         "subagent_mid":  {"model": "kimi-k3", "provider": "inference-net", "context": 1048576},
         "compact":       {"model": "glm-5.3-flash", "provider": "inference-net", "context": 128000},
+        "memory":        {"model": "glm-5.3-flash", "provider": "inference-net", "context": 128000},
     },
 }
 

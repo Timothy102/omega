@@ -1,14 +1,16 @@
-import asyncio, sys
+import asyncio
+import sys
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
-from rich.console import Console
 
-from . import config, loop, mcp, permissions, session, subagent, tools
+from . import config, mcp, session, subagent, tools
+from .memory import consolidate
+from .ui import plain
 
-console = Console()
+console = plain.console
 BANNER = "[dim]rig — /plan to plan, /build to execute, ctrl-d to exit[/dim]"
 
 HISTORY = Path.home() / ".rig" / "history"
@@ -57,6 +59,16 @@ async def main():
                 sid = extra[i + 1] if i + 1 < len(extra) else "<id>"
                 console.print(f"      to open it:  [bold]rig --resume {sid}[/bold]")
         return console.print(session.render_list())
+    if argv and argv[0] == "memory":
+        # gc needs config.load(), unlike setup/sessions above -- keep it local
+        # to this branch instead of moving it above the flag-parsing section.
+        cfg = config.load()
+        if len(argv) > 1 and argv[1] == "gc":
+            console.print(await consolidate.run(cfg, "project", force=True))
+            console.print(await consolidate.run(cfg, "global", force=True))
+        else:
+            console.print("usage: rig memory gc")
+        return
 
     # Parse every flag up front so order never matters.
     flags = {a for a in argv if a.startswith("-")}
@@ -77,7 +89,8 @@ async def main():
     cfg = config.load()
     subagent.CFG = cfg
     if not yolo and sys.stdin.isatty():
-        tools.CONFIRM = confirm
+        tools.CONFIRM = plain.confirm
+        tools.ASK_USER = plain.ask_user
 
     sess = None
     if want_continue:
@@ -101,6 +114,7 @@ async def main():
 
     if sess is None:
         sess = session.Session.new(mode=mode)
+    tools.SESSION_ID = sess.id
     history = sess.history
     if history:
         # Without this the model has no signal it is mid-conversation and can
@@ -111,7 +125,8 @@ async def main():
 
     prompt = " ".join(argv).strip()
     if prompt:
-        await one_shot(cfg, history, prompt, mode, sess)
+        await plain.run_prompt(cfg, history, prompt, mode, sess)
+        await _consolidate_on_close(cfg)
         return
 
     console.print(BANNER)
@@ -123,77 +138,30 @@ async def main():
             continue
         except EOFError:
             console.print()
+            await _consolidate_on_close(cfg)
             return
         if line in ("/plan", "/build"):
             mode = line[1:]
             console.print(f"[dim]mode: {mode}[/dim]")
             continue
+        if line == "/memory-gc":
+            console.print(f"[dim]{await consolidate.run(cfg, 'project', force=True)}[/dim]")
+            console.print(f"[dim]{await consolidate.run(cfg, 'global', force=True)}[/dim]")
+            continue
         if line:
-            await one_shot(cfg, history, line, mode, sess)
+            await plain.run_prompt(cfg, history, line, mode, sess)
 
 
-async def confirm(name, args, why) -> bool:
-    detail = str(args.get("command") or args.get("path")
-                 or args.get("name") or "")[:200]
-    console.print(f"\n[yellow]⏸  {name}[/yellow] [dim]{why}[/dim]")
-    if detail:
-        console.print(f"   [bold]{detail}[/bold]", highlight=False)
+async def _consolidate_on_close(cfg):
+    # A provider error here must never block exit -- consolidation is a
+    # courtesy, not a precondition for closing the session.
     try:
-        answer = (await asyncio.to_thread(
-            input, "   allow? [y]es / [N]o / [a]lways: ")).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    if answer == "a":
-        permissions.remember(permissions.rule_for(name, args), permissions.ALLOW)
-        return True
-    return answer.startswith("y")
-
-
-async def one_shot(cfg, history, prompt, mode, sess=None):
-    history.append({"role": "user", "content": prompt})
-
-    def on_text(delta):
-        console.print(delta, end="", markup=False, highlight=False)
-
-    def on_compact(note):
-        if sess:
-            sess.compactions += 1
-        console.print(f"\n[dim]⏺ {note}[/dim]", highlight=False)
-
-    def on_tool(call):
-        detail = ""
-        try:
-            args = call.args()
-            detail = str(args.get("path") or args.get("pattern")
-                         or args.get("command") or args.get("task") or "")[:60]
-        except Exception:
-            pass
-        console.print(f"\n[dim]⏺ {call.name}[/dim] [dim italic]{detail}[/dim italic]",
-                      highlight=False)
-
-    interrupted = False
-    try:
-        await loop.run_turn(cfg, history, mode=mode, on_text=on_text,
-                            on_tool=on_tool, on_compact=on_compact)
-    except KeyboardInterrupt:
-        # BaseException, so a bare `except Exception` misses it entirely and the
-        # process dies before the session is ever written.
-        interrupted = True
-        console.print("\n[dim]interrupted[/dim]")
-    except Exception as e:
-        console.print(f"\n[red]error:[/red] {type(e).__name__}: {e}")
-    finally:
-        if sess:
-            sess.mode = mode
-            session.repair(history)
-            if interrupted:
-                history.append({"role": "user",
-                                "content": "[previous turn interrupted by user]"})
-            try:
-                sess.save()
-            except Exception as e:
-                console.print(f"[red]could not save session:[/red] {e}")
-    console.print()
+        for scope in ("project", "global"):
+            summary = await consolidate.run(cfg, scope, force=False)
+            if summary:
+                console.print(f"[dim]{summary}[/dim]")
+    except Exception:
+        pass
 
 
 async def _main_guarded():
