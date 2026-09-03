@@ -69,21 +69,34 @@ Prefer a file? Write `~/.rig/config.json` yourself:
     "my-provider": {
       "baseUrl": "https://api.example.com/v1",
       "apiKeyEnv": "MY_API_KEY"
+    },
+    "anthropic": {
+      "type": "anthropic",
+      "apiKeyEnv": "ANTHROPIC_API_KEY"
     }
   },
+  "models": {
+    "opus":  { "model": "claude-opus-5",   "provider": "anthropic",  "context": 1048576, "effort": "high" },
+    "small": { "model": "small-model",     "provider": "my-provider", "context": 128000 }
+  },
   "roles": {
-    "main":          { "model": "big-model",   "provider": "my-provider", "context": 200000 },
-    "plan":          { "model": "big-model",   "provider": "my-provider", "context": 200000 },
-    "subagent_fast": { "model": "small-model", "provider": "my-provider", "context": 128000 },
-    "subagent_mid":  { "model": "big-model",   "provider": "my-provider", "context": 200000 },
-    "compact":       { "model": "small-model", "provider": "my-provider", "context": 128000 },
-    "memory":        { "model": "small-model", "provider": "my-provider", "context": 128000 }
+    "main":          { "alias": "opus" },
+    "plan":          { "alias": "opus" },
+    "subagent_fast": { "alias": "small" },
+    "subagent_mid":  { "alias": "opus" },
+    "compact":       { "alias": "small" },
+    "memory":        { "alias": "small" }
   }
 }
 ```
 
 Use `apiKey` for a literal value or `apiKeyEnv` to read from the environment.
-The file is written `0600`.
+The file is written `0600`. A provider missing its key still loads fine — it
+only fails, with a pointer to `rig setup` or the env var, when a role that
+uses it actually runs.
+
+A role is either an alias into `models` (above) or the older inline form
+(`{ "model", "provider", "context" }`) — both work side by side.
 
 ### Roles
 
@@ -96,6 +109,28 @@ The file is written `0600`.
 | `compact` | summarises old context when the window fills |
 | `memory` | background consolidation of saved memory notes |
 
+### Models
+
+`providers[*].type` is `"openai"` (any OpenAI-compatible `/chat/completions`
+endpoint — the default) or `"anthropic"` (the native Anthropic SDK, with
+adaptive thinking, per-turn effort, prompt caching, and refusal fallbacks
+built in). The built-in catalog:
+
+| alias | model | provider | context |
+|---|---|---|---|
+| `fable` | `claude-fable-5-1` | anthropic | 1M |
+| `opus` | `claude-opus-5` | anthropic | 1M |
+| `sonnet` | `claude-sonnet-5` | anthropic | 1M |
+| `haiku` | `claude-haiku-4-5` | anthropic | 200k |
+| `kimi` | `moonshotai/kimi-k3` | openrouter-style | 1M |
+| `glm` | `z-ai/glm-5.3-flash` | openrouter-style | 128k |
+
+`rig models` prints the catalog with each role's current default.
+`rig --model <alias-or-model-id>` overrides `main` and `plan` for the
+session; `/model` in the TUI opens a picker (or takes an alias directly:
+`/model sonnet`), and the status bar always shows the alias in use next to
+the underlying model id.
+
 ## Usage
 
 ```bash
@@ -103,19 +138,28 @@ rig                              # interactive TUI
 rig "fix the failing test"       # one-shot, plain output
 echo "fix the failing test" | rig
 rig --plan "add rate limiting"   # read-only: investigate and plan
+rig --model sonnet "..."         # override main/plan for this session
 rig --continue                   # resume this directory's last session
 rig --resume 20260828-174247     # resume by id (a prefix works)
 rig sessions                     # list sessions
+rig models                       # show the model catalog and role defaults
 rig memory gc                    # consolidate memory now
+rig onboard                      # short terminal setup (no browser)
 rig --mcp "list my Linear issues"
 rig --yolo "..."                 # skip permission prompts
 ```
 
-In the TUI: `/plan` and `/build` switch modes, `/memory-gc` consolidates
-memory, `/quit` or ctrl-d exits, ctrl-c abandons the current turn without
-losing the session, up/down walk input history. Permission prompts and
-`ask_user` questions open as modals — arrow keys and enter, or type a
-free-text answer.
+The first time rig runs with no `~/.rig/config.json`, or with no usable key
+for `main`, it walks you through a short interactive setup right in the
+terminal instead of exiting — pick a provider, paste a key, pick a model, and
+it runs one real turn to prove it works. `rig setup` opens the fuller browser
+flow (multiple roles, MCP servers, latency benchmarking) any time after.
+
+In the TUI: `/plan` and `/build` switch modes, `/model` picks a model,
+`/memory-gc` consolidates memory, `/quit` or ctrl-d exits, ctrl-c abandons
+the current turn without losing the session, up/down walk input history,
+ctrl-o opens the model picker. Permission prompts and `ask_user` questions
+open as modals — arrow keys and enter, or type a free-text answer.
 
 ## Context and artifacts
 

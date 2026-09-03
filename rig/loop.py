@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import cast
 
 from . import compact, events, llm, memory, subagent, tools
-from .config import Config
+from .config import Config, Role
 from .llm import ToolCall, Turn
 from .session import Message
 
@@ -81,9 +81,10 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
                     tool_names: set[str] | None = None,
                     emit: Callable[[events.Event], None] | None = None,
                     max_rounds: int = 60, subagent_id: str | None = None,
-                    tier: str | None = None) -> str:
+                    tier: str | None = None, role: Role | None = None) -> str:
     emit = emit or (lambda _e: None)
-    role = cfg.role(role_name)
+    role = role or cfg.role(role_name)
+    emit(events.ModelUsed(alias=role.alias, model=role.model, provider=role.provider.name))
     schemas = tools.schemas(tool_names)
 
     # Tool schemas and the system prompt are part of every request and dwarf
@@ -154,7 +155,8 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
 
 
 async def run_turn(cfg: Config, history: list[Message], mode: str = "build",
-                   emit: Callable[[events.Event], None] | None = None) -> str:
+                   emit: Callable[[events.Event], None] | None = None,
+                   model: str | None = None) -> str:
     tools.set_tainted(False)
     subagent.EMIT = emit
     system, tool_names = MODES[mode]
@@ -165,5 +167,6 @@ async def run_turn(cfg: Config, history: list[Message], mode: str = "build",
     if _MEMORY_SNAPSHOT is None:
         _MEMORY_SNAPSHOT = memory.preamble()
     system = f"{system}\n{UNTRUSTED_NOTE}\n\n# Persistent memory\n{_MEMORY_SNAPSHOT}"
+    role = cfg.model(model) if model else None
     return await run_agent(cfg, "main" if mode == "build" else "plan",
-                           system, history, tool_names, emit)
+                           system, history, tool_names, emit, role=role)

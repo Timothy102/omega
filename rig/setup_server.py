@@ -28,7 +28,7 @@ def _cfg() -> Body:
     return config.DEFAULTS
 
 
-ALLOWED_TOP = {"providers", "roles", "mcp"}
+ALLOWED_TOP = {"providers", "models", "roles", "mcp"}
 
 
 def _validate(data: Body) -> Body:
@@ -38,6 +38,8 @@ def _validate(data: Body) -> Body:
     if unknown:
         raise ValueError(f"unexpected keys: {sorted(unknown)}")
     for name, prov in (data.get("providers") or {}).items():
+        if prov.get("type") == "anthropic":
+            continue  # no baseUrl needed -- the SDK talks to api.anthropic.com directly
         url = prov.get("baseUrl", "")
         if not re.match(r"^https://[A-Za-z0-9.\-]+(:\d+)?(/[\w./\-]*)?$", url):
             raise ValueError(f"provider {name!r}: baseUrl must be a plain https URL")
@@ -61,10 +63,46 @@ def _provider(body: Body) -> tuple[str, str]:
     if not key and p.get("apiKeyEnv"):
         import os
         key = os.environ.get(p["apiKeyEnv"], "")
-    return p["baseUrl"].rstrip("/"), key
+    return (p.get("baseUrl") or "").rstrip("/"), key
+
+
+def _provider_type(body: Body) -> str:
+    cfg = _cfg()
+    name = body.get("provider") or next(iter(cfg["providers"]))
+    return str(cfg["providers"][name].get("type", "openai"))
+
+
+def _anthropic_catalog() -> list[str]:
+    return sorted({m["model"] for m in config.DEFAULTS["models"].values()
+                  if m["model"].startswith("claude")})
+
+
+async def _probe_anthropic(model: str, key: str, prompt: str) -> Body:
+    """The latency/reachability probe, routed through llm.stream instead of a
+    raw httpx POST -- an anthropic provider speaks the Messages API, not
+    OpenAI's /chat/completions."""
+    import time
+
+    from . import llm
+    from .config import Provider, Role
+    if not key:
+        return {"model": model, "ok": False, "error": "no API key set"}
+    role = Role(model=model, provider=Provider(name="setup-probe", type="anthropic", api_key_literal=key),
+               context=200000)
+    t0 = time.perf_counter()
+    try:
+        async for kind, _payload in llm.stream(role, [{"role": "user", "content": prompt}]):
+            if kind == "done":
+                break
+        return {"model": model, "ok": True, "ms": round((time.perf_counter() - t0) * 1000)}
+    except Exception as e:
+        return {"model": model, "ok": False, "ms": round((time.perf_counter() - t0) * 1000),
+                "error": f"{type(e).__name__}: {e}"[:120]}
 
 
 def api_models(body: Body) -> Body:
+    if _provider_type(body) == "anthropic":
+        return {"models": _anthropic_catalog()}
     base, key = _provider(body)
     if not key:
         return {"error": "no API key set"}
@@ -76,8 +114,11 @@ def api_models(body: Body) -> Body:
 
 def api_test_model(body: Body) -> Body:
     import time
-    base, key = _provider(body)
     model = body["model"]
+    if _provider_type(body) == "anthropic":
+        _base, key = _provider(body)
+        return asyncio.run(_probe_anthropic(model, key, "Reply with the single word: ok"))
+    base, key = _provider(body)
     t0 = time.perf_counter()
     try:
         r = httpx.post(f"{base}/chat/completions",
@@ -127,6 +168,17 @@ BENCH_CANDIDATES = ["glm-5.3-flash", "kimi-k3", "gemini-2.5-flash-lite",
 def api_benchmark(body: Body) -> Body:
     """Measure time-to-first-token and tool-calling for candidate models."""
     import time
+    if _provider_type(body) == "anthropic":
+        _base, key = _provider(body)
+        models = body.get("models") or _anthropic_catalog()
+
+        async def go_anthropic() -> list[Body]:
+            return [await _probe_anthropic(m, key, "Say ok.") for m in models]
+
+        rows = asyncio.run(go_anthropic())
+        rows.sort(key=lambda r: (not r["ok"], r.get("ms", 9e9)))
+        return {"results": rows}
+
     base, key = _provider(body)
     models = body.get("models") or BENCH_CANDIDATES
     catalog = api_models(body).get("models", [])
@@ -194,6 +246,16 @@ def _redacted_cfg(_b: Body | None = None) -> Body:
             prov["apiKey"] = ""
             prov["hasKey"] = True
             prov["keyMask"] = "••••••••"
+    # A role may be written as a catalog alias ({"alias": "opus"}); the wizard
+    # only understands the inline {model, provider, context} shape, so resolve
+    # every role to that shape for the page regardless of how it's stored.
+    try:
+        resolved = config.load()
+        c["roles"] = {name: {"model": r.model, "provider": r.provider.name,
+                             "context": r.context, "alias": r.alias}
+                      for name, r in resolved.roles.items()}
+    except SystemExit:
+        pass
     return c
 
 

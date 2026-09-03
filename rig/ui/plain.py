@@ -81,10 +81,12 @@ def render(ev: events.Event) -> None:
             pass
         case events.Usage():
             pass
+        case events.ModelUsed():
+            pass
 
 
 async def run_prompt(cfg: Config, history: list[Message], prompt: str, mode: str,
-                     sess: Session | None = None) -> None:
+                     sess: Session | None = None, model: str | None = None) -> None:
     history.append({"role": "user", "content": prompt})
 
     def emit(ev: events.Event) -> None:
@@ -95,7 +97,7 @@ async def run_prompt(cfg: Config, history: list[Message], prompt: str, mode: str
 
     interrupted = False
     try:
-        await loop.run_turn(cfg, history, mode=mode, emit=emit)
+        await loop.run_turn(cfg, history, mode=mode, emit=emit, model=model)
     except KeyboardInterrupt:
         # BaseException, so a bare `except Exception` misses it entirely and the
         # process dies before the session is ever written.

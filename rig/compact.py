@@ -70,6 +70,16 @@ async def maybe_compact(cfg: Config, history: list[Message], used: int, limit: i
     if not summary.strip():
         return None
 
+    # Anthropic's "preserved thinking" check binds a Claude Fable 5.1 thinking
+    # block's signature to the exact conversation prefix that produced it;
+    # summarising `older` into one message is itself a history edit, which
+    # invalidates every thinking block still carried by `recent`. Dropping the
+    # blocks (unbilled, and explicitly sanctioned as the no-beta recovery path)
+    # is simpler and safer than keeping them alive across a rewritten prefix --
+    # the model just answers the next turn without that carried-over reasoning.
+    for m in recent:
+        m.pop("thinking", None)
+
     history[:] = [{"role": "user",
                    "content": f"[Summary of earlier conversation]\n{summary}"},
                   *recent]

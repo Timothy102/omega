@@ -40,8 +40,10 @@ async def _subagent(task: str, tier: str = "fast") -> str:
 
     def forward(ev: events.Event) -> None:
         # The subagent's prose is its return value, not transcript text --
-        # only its tool activity is visible upward.
-        if not isinstance(ev, events.TextDelta | events.Done):
+        # only its tool activity is visible upward. ModelUsed is also
+        # swallowed: it names the subagent's own tier model and would
+        # otherwise stomp the top-level turn's status-bar model on emit.
+        if not isinstance(ev, events.TextDelta | events.Done | events.ModelUsed):
             emit(ev)
 
     emit(events.SubagentSpawned(subagent_id=subagent_id, tier=tier,

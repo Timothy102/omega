@@ -6,8 +6,15 @@ from rig import artifacts, events, llm, loop, tools
 from rig.llm import ToolCall, Turn
 
 
+class FakeProvider:
+    name = "fake-provider"
+
+
 class FakeRole:
     context = 1_000_000
+    model = "fake-model"
+    alias = None
+    provider = FakeProvider()
 
 
 class FakeCfg:
@@ -49,9 +56,10 @@ async def test_emits_tool_start_end_text_done_in_order(tmp_path, monkeypatch):
 
     assert result == "done!"
     assert [type(e) for e in received] == [
-        events.ToolStart, events.ToolEnd, events.Usage, events.TextDelta, events.Done]
+        events.ModelUsed, events.ToolStart, events.ToolEnd, events.Usage,
+        events.TextDelta, events.Done]
 
-    start, end, _usage, delta, done = received
+    _model_used, start, end, _usage, delta, done = received
     assert start.call_id == "call_1" and start.name == "read"
     assert start.args_preview == str(target)[:60]
     assert start.subagent_id is None and start.tier is None

@@ -64,8 +64,14 @@ const ROLES={main:["Main","drives your session — pick the smartest"],
 
 const STEPS=[
 {t:"Provider",r:()=>`<h2>Connect a provider</h2>
- <p class="dim">rig talks to any OpenAI-compatible endpoint.</p>
- <label>Base URL</label><input id="baseUrl" value="${Object.values(cfg.providers)[0].baseUrl}">
+ <p class="dim">rig talks to Anthropic natively, or any OpenAI-compatible endpoint.</p>
+ <label>Provider type</label>
+ <select id="providerType" onchange="onProviderTypeChange()">
+   <option value="openai"${Object.values(cfg.providers)[0].type!=='anthropic'?' selected':''}>OpenAI-compatible</option>
+   <option value="anthropic"${Object.values(cfg.providers)[0].type==='anthropic'?' selected':''}>Anthropic (native)</option>
+ </select>
+ <div id="baseUrlRow" style="${Object.values(cfg.providers)[0].type==='anthropic'?'display:none':''}">
+ <label>Base URL</label><input id="baseUrl" value="${Object.values(cfg.providers)[0].baseUrl||''}"></div>
  <label>API key ${Object.values(cfg.providers)[0].hasKey?'<span class="ok">· already stored</span>':''}</label>
  <input id="apiKey" type="password" placeholder="${Object.values(cfg.providers)[0].hasKey?'•••••••••••• (stored)':'sk-…'}">
  <div class="msg" id="m"></div>`,
@@ -113,12 +119,19 @@ async function go(d){
   if(d>0) await save();
   step=Math.max(0,Math.min(STEPS.length-1,step+d)); render();
 }
+function onProviderTypeChange(){
+  const p=Object.values(cfg.providers)[0], isAnthropic=$("#providerType").value==="anthropic";
+  p.type=$("#providerType").value;
+  $("#baseUrlRow").style.display = isAnthropic ? "none" : "";
+}
 async function verify(){
   const m=$("#m"); m.textContent="checking…"; m.className="msg dim";
+  const p=Object.values(cfg.providers)[0];
+  p.type=$("#providerType").value;
   const body={}; const k=$("#apiKey")?.value; if(k) body.apiKey=k;
-  if($("#baseUrl")) Object.values(cfg.providers)[0].baseUrl=$("#baseUrl").value;
-  if(k) Object.values(cfg.providers)[0].apiKey=k;
-  else delete Object.values(cfg.providers)[0].apiKey;  // never write back a redacted key
+  if(p.type!=='anthropic' && $("#baseUrl")) p.baseUrl=$("#baseUrl").value;
+  if(k) p.apiKey=k;
+  else delete p.apiKey;  // never write back a redacted key
   const r=await api("/api/models",body);
   if(r.error){ m.textContent="✗ "+r.error.slice(0,90); m.className="msg err"; return keyOk=false; }
   models=r.models; keyOk=true;

@@ -24,6 +24,7 @@ class Session:
     updated: float = 0.0
     history: list[Message] = field(default_factory=list)
     compactions: int = 0
+    model_override: str | None = None
 
     @classmethod
     def new(cls, cwd: str | None = None, mode: str = "build") -> "Session":

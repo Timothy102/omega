@@ -16,7 +16,7 @@ from ... import config, events, loop, session
 from ...memory import consolidate
 from .activity import ActivityPanel
 from .history import InputHistory
-from .modals import AskUserScreen, ConfirmScreen
+from .modals import AskUserScreen, ConfirmScreen, ModelPickerScreen
 from .status import StatusBar, StatusState
 from .transcript import Transcript
 
@@ -32,18 +32,23 @@ class RigApp(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Cancel turn", show=False, priority=True),
         Binding("ctrl+d", "quit_app", "Quit", show=False, priority=True),
+        # ctrl+m is not usable here: terminals send the same byte for it as
+        # for Enter, so it would fire the input's submit binding instead.
+        Binding("ctrl+o", "pick_model", "Model", show=False, priority=True),
         Binding("up", "history_prev", "Prev", show=False),
         Binding("down", "history_next", "Next", show=False),
     ]
 
     def __init__(self, cfg: config.Config, sess: session.Session, mode: str,
-                 history: list[dict[str, Any]]) -> None:
+                 history: list[dict[str, Any]], model_alias: str | None = None) -> None:
         super().__init__()
         self.cfg = cfg
         self.sess = sess
         self.mode = mode
         self.history = history
+        self.model_alias = model_alias
         self._usage: events.Usage | None = None
+        self._last_model: tuple[str | None, str] | None = None
         self._turn_worker: Worker[None] | None = None
         self._input_history: InputHistory | None = None
 
@@ -76,12 +81,17 @@ class RigApp(App[None]):
 
     def _refresh_status(self) -> None:
         role_name = self._role_name()
-        try:
-            model = str(getattr(self.cfg.role(role_name), "model", "?"))
-        except Exception:
-            model = "?"
+        alias, model = self._last_model or (None, "?")
+        if self._last_model is None:
+            # Before the first ModelUsed event of the session, fall back to a
+            # static lookup so the status bar isn't blank on first render.
+            try:
+                role = self.cfg.model(self.model_alias) if self.model_alias else self.cfg.role(role_name)
+                alias, model = role.alias, str(role.model)
+            except Exception:
+                alias, model = self.model_alias, "?"
         turns = sum(1 for m in self.history if m.get("role") == "user")
-        state = StatusState(mode=self.mode, role_name=role_name, model=model,
+        state = StatusState(mode=self.mode, role_name=role_name, model=model, alias=alias,
                             session_id=self.sess.id, turns=turns, usage=self._usage)
         self.query_one(StatusBar).set_state(state)
 
@@ -116,6 +126,9 @@ class RigApp(App[None]):
             case events.Usage():
                 self._usage = ev
                 self._refresh_status()
+            case events.ModelUsed(alias=alias, model=model):
+                self._last_model = (alias, model)
+                self._refresh_status()
             case events.Done(text=text):
                 transcript.finalize_turn(text)
 
@@ -141,6 +154,10 @@ class RigApp(App[None]):
             self._refresh_status()
         elif text == "/memory-gc":
             self.run_worker(self._memory_gc(), exclusive=False, thread=False)
+        elif text == "/model":
+            self.run_worker(self._pick_model(), exclusive=False, thread=False)
+        elif text.startswith("/model "):
+            self._set_model(text[len("/model "):].strip())
         elif text == "/quit":
             self.action_quit_app()
         else:
@@ -151,6 +168,27 @@ class RigApp(App[None]):
         transcript.add_dim(await consolidate.run(self.cfg, "project", force=True))
         transcript.add_dim(await consolidate.run(self.cfg, "global", force=True))
 
+    async def _pick_model(self) -> None:
+        alias = await self.push_screen_wait(ModelPickerScreen(self.cfg.models, self.model_alias))
+        if alias:
+            self._set_model(alias)
+
+    def _set_model(self, arg: str) -> None:
+        try:
+            alias = self.cfg.resolve_alias(arg)
+        except SystemExit as e:
+            self.query_one(Transcript).add_dim(str(e))
+            return
+        self.model_alias = alias
+        self.sess.model_override = alias
+        role = self.cfg.model(alias)
+        self._last_model = (alias, role.model)
+        self.query_one(Transcript).add_dim(f"model: {alias} · {role.model}")
+        self._refresh_status()
+
+    def action_pick_model(self) -> None:
+        self.run_worker(self._pick_model(), exclusive=False, thread=False)
+
     def _start_turn(self, text: str) -> None:
         self.history.append({"role": "user", "content": text})
         self.query_one(Transcript).add_user_message(text)
@@ -160,7 +198,8 @@ class RigApp(App[None]):
     async def _run_turn(self) -> None:
         interrupted = False
         try:
-            await loop.run_turn(self.cfg, self.history, mode=self.mode, emit=self.emit)
+            await loop.run_turn(self.cfg, self.history, mode=self.mode, emit=self.emit,
+                                model=self.model_alias)
         except asyncio.CancelledError:
             interrupted = True
         except Exception as e:

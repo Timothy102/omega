@@ -16,6 +16,7 @@ class StatusState:
     session_id: str
     turns: int
     usage: events.Usage | None
+    alias: str | None = None
 
 
 def _fmt_tokens(n: int) -> str:
@@ -31,7 +32,8 @@ def _fmt_usage(usage: events.Usage | None) -> str:
 
 def format_status(state: StatusState) -> str:
     tokens = _fmt_usage(state.usage)
-    return (f" {state.mode} · {state.role_name} {state.model} · "
+    model = f"{state.alias} · {state.model}" if state.alias else state.model
+    return (f" {state.mode} · {state.role_name} {model} · "
             f"tokens {tokens} · {state.session_id} · turns {state.turns}")
 
 

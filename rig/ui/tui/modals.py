@@ -12,6 +12,7 @@ from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from ... import events, permissions
+from ...config import Model
 
 _DIALOG_CSS = """
 Vertical#dialog {
@@ -160,3 +161,44 @@ class AskUserScreen(ModalScreen[str]):
 
     def action_cancel(self) -> None:
         self.dismiss("(no answer)")
+
+
+class ModelPickerScreen(ModalScreen[str | None]):
+    """`/model` with no argument: pick a catalog alias. Returns the chosen
+    alias, or None on cancel."""
+
+    DEFAULT_CSS = _DIALOG_CSS + """
+    ModelPickerScreen { align: center middle; }
+    ModelPickerScreen #models { height: auto; max-height: 14; margin-top: 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+
+    def __init__(self, models: dict[str, Model], current: str | None) -> None:
+        super().__init__()
+        self.aliases = sorted(models)
+        self.models = models
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("[yellow]Choose a model[/yellow]")
+            yield OptionList(*self._render_options(), id="models")
+
+    def on_mount(self) -> None:
+        self.query_one("#models", OptionList).focus()
+
+    def _render_options(self) -> list[Option]:
+        rendered = []
+        for alias in self.aliases:
+            m = self.models[alias]
+            mark = "› " if alias == self.current else "  "
+            text = (f"{mark}{alias:<10}{m.model:<26}{m.provider:<14}"
+                   f"{m.context:>10,}  {m.effort or '-'}")
+            rendered.append(Option(text, id=f"model-{alias}"))
+        return rendered
+
+    def on_option_list_option_selected(self, message: OptionList.OptionSelected) -> None:
+        self.dismiss(self.aliases[message.option_index])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)

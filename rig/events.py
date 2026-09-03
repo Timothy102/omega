@@ -81,5 +81,12 @@ class Usage:
     limit: int
 
 
+@dataclass(frozen=True)
+class ModelUsed:
+    alias: str | None
+    model: str
+    provider: str
+
+
 Event = (TextDelta | ToolStart | ToolEnd | Compacted | MemoryWrite |
-         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage)
+         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed)

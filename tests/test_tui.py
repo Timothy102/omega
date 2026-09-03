@@ -5,21 +5,48 @@ from rich.markdown import Markdown
 from textual.widgets import Input, Static
 
 from rig import artifacts, events, loop, session
+from rig.config import Model
 from rig.ui import tui
 from rig.ui.tui.activity import ActivityPanel
-from rig.ui.tui.modals import AskUserScreen, ConfirmScreen
+from rig.ui.tui.modals import AskUserScreen, ConfirmScreen, ModelPickerScreen
 from rig.ui.tui.status import StatusBar
 from rig.ui.tui.transcript import Transcript
+
+
+class FakeProvider:
+    name = "fake-provider"
 
 
 class FakeRole:
     context = 1_000_000
     model = "fake-model"
+    alias = None
+    provider = FakeProvider()
 
 
 class FakeCfg:
+    models = {
+        "opus": Model(alias="opus", model="claude-opus-5", provider="anthropic",
+                      context=1_000_000, effort="high"),
+        "haiku": Model(alias="haiku", model="claude-haiku-4-5", provider="anthropic",
+                       context=200_000),
+    }
+
     def role(self, name):
         return FakeRole()
+
+    def model(self, alias):
+        m = self.models[alias]
+        return type("R", (), {"model": m.model, "alias": m.alias, "context": m.context,
+                              "provider": FakeProvider(), "effort": m.effort})()
+
+    def resolve_alias(self, text):
+        if text in self.models:
+            return text
+        for alias, m in self.models.items():
+            if m.model == text:
+                return alias
+        raise SystemExit(f"rig: unknown model {text!r}; have {sorted(self.models)}")
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +85,7 @@ async def test_submit_streams_reply_offloads_and_updates_state(monkeypatch):
     monkeypatch.setattr(app.sess, "close_turn",
                         lambda h, m, i: close_calls.append((m, i)))
 
-    async def fake_run_turn(cfg, history, mode, emit):
+    async def fake_run_turn(cfg, history, mode, emit, model=None):
         emit(events.TextDelta("Hello "))
         emit(events.TextDelta("world"))
         emit(events.ToolStart(call_id="c1", name="bash", args_preview="ls"))
@@ -159,3 +186,26 @@ async def test_confirm_modal_y_allows():
         await _wait_for(pilot, lambda: "value" in result)
 
     assert result["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_model_command_opens_picker_and_selecting_updates_state():
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/model"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: isinstance(app.screen, ModelPickerScreen))
+
+        # Catalog is sorted alphabetically: haiku, then opus -- move down once.
+        await pilot.press("down")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: app.model_alias == "opus")
+
+        assert app.sess.model_override == "opus"
+        status_text = str(app.query_one(StatusBar).content)
+        assert "opus" in status_text and "claude-opus-5" in status_text
+
+        transcript_texts = _texts(app.query_one(Transcript))
+        assert any("model: opus · claude-opus-5" in t for t in transcript_texts)
