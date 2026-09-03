@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 
 class Option(TypedDict, total=False):
@@ -30,6 +30,8 @@ class ToolEnd:
     duration_s: float
     offloaded: bool
     artifact_id: str | None = None
+    result_chars: int = 0
+    outcome: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,5 +90,10 @@ class ModelUsed:
     provider: str
 
 
+@dataclass(frozen=True)
+class Phase:
+    state: Literal["waiting", "thinking", "streaming", "tools", "idle"]
+
+
 Event = (TextDelta | ToolStart | ToolEnd | Compacted | MemoryWrite |
-         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed)
+         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed | Phase)

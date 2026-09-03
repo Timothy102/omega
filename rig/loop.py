@@ -1,12 +1,13 @@
 import asyncio
 import time
 from collections.abc import Callable
-from typing import cast
+from typing import Literal, cast
 
 from . import compact, events, llm, memory, subagent, tools
 from .config import Config, Role
 from .llm import ToolCall, Turn
 from .session import Message
+from .ui import format
 
 BUILD_SYSTEM = """You are rig, a terminal coding agent.
 
@@ -69,12 +70,9 @@ MODES: dict[str, tuple[str, set[str] | None]] = {
 
 def _args_preview(call: ToolCall) -> str:
     try:
-        args = call.args()
-        detail = str(args.get("path") or args.get("pattern") or args.get("command")
-                     or args.get("task") or args.get("query") or "")
+        return format.describe_call(call.name, call.args())
     except Exception:
-        detail = ""
-    return detail[:60]
+        return ""
 
 
 async def run_agent(cfg: Config, role_name: str, system: str, history: list[Message],
@@ -98,9 +96,16 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
         dispatched: list[tuple[ToolCall, asyncio.Task[str], float]] = []
         turn: Turn | None = None
 
+        emit(events.Phase("waiting"))
+        text_started = False
         try:
             async for kind, payload in llm.stream(role, messages, schemas):
-                if kind == "text":
+                if kind == "phase":
+                    emit(events.Phase(cast(Literal["thinking", "streaming"], payload)))
+                elif kind == "text":
+                    if not text_started:
+                        text_started = True
+                        emit(events.Phase("streaming"))
                     emit(events.TextDelta(cast(str, payload)))
                 elif kind == "tool":
                     call = cast(ToolCall, payload)
@@ -118,22 +123,30 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
             if dispatched:
                 await asyncio.gather(*(t for _, t, _ in dispatched),
                                      return_exceptions=True)
+            emit(events.Phase("idle"))
             raise
 
         assert turn is not None, "llm.stream always ends with a 'done' event"
         history.append(turn.as_message())
         if not turn.tool_calls:
             emit(events.Done(turn.text))
+            emit(events.Phase("idle"))
             return turn.text
 
+        emit(events.Phase("tools"))
         results = await asyncio.gather(*(t for _, t, _ in dispatched))
         for (call, _, started), result in zip(dispatched, results, strict=True):
             text = str(result)
             offloaded, artifact_id = tools.offload_info(text)
+            result_chars = format.result_char_count(text, offloaded)
+            duration_s = time.monotonic() - started
+            outcome = format.describe_outcome(call.name, text, duration_s, offloaded,
+                                              artifact_id, result_chars)
             emit(events.ToolEnd(call_id=call.id, name=call.name,
                                 result_preview=" ".join(text.split())[:120],
-                                duration_s=time.monotonic() - started,
-                                offloaded=offloaded, artifact_id=artifact_id))
+                                duration_s=duration_s,
+                                offloaded=offloaded, artifact_id=artifact_id,
+                                result_chars=result_chars, outcome=outcome))
             history.append({"role": "tool", "tool_call_id": call.id,
                             "content": text})
 
@@ -151,6 +164,7 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
             emit(events.Compacted(f"compaction skipped: {type(e).__name__}"))
 
     emit(events.Done("(hit max rounds)"))
+    emit(events.Phase("idle"))
     return "(hit max rounds)"
 
 

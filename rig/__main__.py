@@ -19,7 +19,10 @@ async def main() -> None:
         return serve()
     if argv and argv[0] == "onboard":
         from . import onboarding
-        return await onboarding.run()
+        wrote = await onboarding.run()
+        if not wrote:
+            return console.print("[dim]onboarding cancelled -- no config written.[/dim]")
+        return
     if argv and argv[0] == "sessions":
         # `sessions` lists and exits; silently swallowing further flags made
         # `rig sessions --resume X` look like it had done something.
@@ -82,7 +85,9 @@ async def main() -> None:
             _ = cfg.role("main").provider.api_key  # raises the helpful SystemExit
         else:
             from . import onboarding
-            await onboarding.run()
+            wrote = await onboarding.run()
+            if not wrote:
+                _ = cfg.role("main").provider.api_key  # raises the helpful SystemExit
             cfg = config.load()
     subagent.CFG = cfg
     # --model overrides both `main` and `plan` for this session; resolved

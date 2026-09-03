@@ -78,5 +78,11 @@ def test_event_type_alias_covers_all_variants():
     args = set(typing.get_args(events.Event))
     expected = {events.TextDelta, events.ToolStart, events.ToolEnd, events.Compacted,
                 events.MemoryWrite, events.MemoryConsolidated, events.SubagentSpawned,
-                events.SubagentDone, events.Error, events.Done, events.Usage, events.ModelUsed}
+                events.SubagentDone, events.Error, events.Done, events.Usage, events.ModelUsed,
+                events.Phase}
     assert args == expected
+
+
+def test_phase_construction():
+    e = events.Phase(state="thinking")
+    assert e.state == "thinking"

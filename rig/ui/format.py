@@ -1,29 +1,221 @@
-"""Pure text formatting for the dim one-liners both UIs render for the same
-events (`ToolStart`/`ToolEnd`/`SubagentSpawned`/`SubagentDone`/`Compacted`/
-`MemoryWrite`/`MemoryConsolidated`/`Error`). Shared here so `ui/plain.py` and
-`ui/tui/transcript.py` cannot drift on wording. Callers own presentation
-concerns these functions don't: `ui/plain.py`'s leading blank-line spacing is
-added at the call site, not here.
+"""Pure text formatting shared by both UIs: the dim one-liners for
+`ToolStart`/`ToolEnd`/`SubagentSpawned`/`SubagentDone`/`Compacted`/
+`MemoryWrite`/`MemoryConsolidated`/`Error`, the per-tool call/outcome
+descriptions, path shortening, and the category color palette. Shared here so
+`ui/plain.py` and `ui/tui/transcript.py` cannot drift on wording or color.
+Callers own presentation concerns these functions don't: `ui/plain.py`'s
+leading blank-line spacing is added at the call site, not here.
 """
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
+from typing import Any
+
 from .. import events
 
+# ---- paths ---------------------------------------------------------------
 
-def tool_start(ev: events.ToolStart) -> str:
+
+def relpath(path: str) -> str:
+    """`path` relative to the cwd, or `~`-abbreviated when it's outside the
+    cwd tree -- an absolute path is mostly noise once you know where you are."""
+    if not path:
+        return path
+    try:
+        p = Path(path).expanduser()
+        abs_p = p if p.is_absolute() else Path(os.getcwd()) / p
+        rel = os.path.relpath(abs_p, os.getcwd())
+        if not rel.startswith(".."):
+            return rel
+    except (ValueError, OSError):
+        pass
+    home = str(Path.home())
+    if path.startswith(home):
+        return "~" + path[len(home):]
+    return path
+
+
+def _truncate(text: Any, limit: int = 60) -> str:
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
+def _q(text: Any, limit: int = 60) -> str:
+    return f"'{_truncate(text, limit)}'"
+
+
+# ---- category colors -------------------------------------------------------
+
+_MEMORY_TOOLS = {"remember", "recall", "supersede", "link"}
+_ARTIFACT_TOOLS = {"fetch_result", "list_artifacts", "save_artifact", "update_artifact"}
+_MCP_TOOLS = {"call_tool", "find_tools"}
+
+STYLE = {
+    "read": "cyan", "write": "yellow", "bash": "magenta", "subagent": "green",
+    "memory": "blue", "artifact": "dim cyan", "ask_user": "bold yellow",
+    "mcp": "bright_blue", "error": "red", "outcome": "dim",
+}
+
+
+def category(name: str) -> str:
+    if name in ("read", "glob", "grep"):
+        return "read"
+    if name in ("write", "edit"):
+        return "write"
+    if name == "bash":
+        return "bash"
+    if name == "subagent":
+        return "subagent"
+    if name in _MEMORY_TOOLS:
+        return "memory"
+    if name in _ARTIFACT_TOOLS:
+        return "artifact"
+    if name == "ask_user":
+        return "ask_user"
+    if name in _MCP_TOOLS or name.startswith("mcp__"):
+        return "mcp"
+    return "read"
+
+
+def style_for(name: str) -> str:
+    return STYLE.get(category(name), "white")
+
+
+# ---- per-tool call descriptions (C9a) --------------------------------------
+
+def describe_call(name: str, args: dict[str, Any]) -> str:
+    """What a tool call is actually doing, for `ToolStart.args_preview` --
+    shared so plain and the TUI never disagree on the wording."""
+    get = args.get
+    if name == "read":
+        path = relpath(str(get("path") or ""))
+        offset, limit = get("offset") or 0, get("limit")
+        suffix = f":{offset}+{limit}" if offset or (limit and limit != 2000) else ""
+        return f"read  {path}{suffix}"
+    if name == "grep":
+        pattern = _truncate(get("pattern") or "")
+        path = relpath(str(get("path") or "."))
+        glob = get("glob") or "*"
+        return f"grep  /{pattern}/  in {path}  ({glob})"
+    if name == "glob":
+        pattern = _truncate(get("pattern") or "")
+        path = relpath(str(get("path") or "."))
+        return f"glob  {pattern}  in {path}"
+    if name == "bash":
+        command = str(get("command") or "").replace("\n", "⏎")
+        return f"bash  $ {_truncate(command, 80)}"
+    if name == "write":
+        content = get("content") or ""
+        return f"write  {relpath(str(get('path') or ''))}  ({len(content)} chars)"
+    if name == "edit":
+        return f"edit  {relpath(str(get('path') or ''))}"
+    if name == "fetch_result":
+        offset, limit = get("offset") or 0, get("limit") or 4000
+        return f"fetch_result  artifact {get('id') or ''} @{offset}+{limit}"
+    if name == "list_artifacts":
+        return "list_artifacts"
+    if name == "save_artifact":
+        return f"save_artifact  {_q(get('title') or '')}"
+    if name == "update_artifact":
+        return f"update_artifact  artifact {get('id') or ''}"
+    if name == "recall":
+        return f"recall  {_q(get('query') or '')}  {get('scope') or 'both'}"
+    if name == "remember":
+        return f"remember  {_q(get('title') or '')}  {get('type') or 'fact'}/{get('scope') or 'project'}"
+    if name == "supersede":
+        return f"supersede  {_q(get('old') or '')}"
+    if name == "link":
+        return f"link  {get('a') or ''} → {get('b') or ''} ({get('relation') or ''})"
+    if name == "subagent":
+        tier = get("tier") or "fast"
+        return f"subagent({tier})  {_truncate(get('task') or '')}"
+    if name == "ask_user":
+        return f"ask_user  {_q(get('question') or '')}"
+    if name == "find_tools":
+        return f"find_tools  {_q(get('query') or '')}"
+    if name == "call_tool":
+        tool_name = str(get("name") or "")
+        parts = tool_name.split("__")
+        label = f"{parts[1]}:{parts[2]}" if len(parts) >= 3 and tool_name.startswith("mcp__") else tool_name
+        kwargs = get("arguments") or {}
+        items = list(kwargs.items())
+        kv = ", ".join(f"{k}={v}" for k, v in items[:4])
+        more = ", …" if len(items) > 4 else ""
+        return f"call_tool  {label}({kv}{more})"
+    detail = str(get("path") or get("pattern") or get("command") or get("task")
+                or get("query") or "")
+    return f"{name}  {_truncate(detail)}" if detail else name
+
+
+# ---- outcome folding (C7b/C9a) ---------------------------------------------
+
+_EXIT_RE = re.compile(r"\[exit (\d+)\]")
+_FULL_CHARS_RE = re.compile(r"\[full output: (\d+) chars")
+
+
+def result_char_count(text: str, offloaded: bool) -> int:
+    """The FULL result length, not the (possibly truncated) preview stored in
+    `ToolEnd.result_preview` -- an offloaded result states its true length in
+    its own footer, so parse that instead of measuring the shortened text."""
+    if offloaded:
+        m = _FULL_CHARS_RE.search(text)
+        if m:
+            return int(m.group(1))
+    return len(text)
+
+
+def describe_outcome(name: str, text: str, duration_s: float, offloaded: bool,
+                     artifact_id: str | None, result_chars: int) -> str:
+    """The `→ …` suffix folded onto a tool's line on `ToolEnd`. Empty string
+    means nothing worth showing (a fast, ordinary, non-offloaded call)."""
+    stripped = text.strip()
+    if stripped.startswith("error:"):
+        return f"→ error: {_truncate(stripped[len('error:'):].strip(), 80)}"
+
+    parts: list[str] = []
+    no_hits = stripped in ("(no matches)", "")
+    if name == "read":
+        parts.append(f"{len(text.splitlines())} lines")
+    elif name == "grep":
+        parts.append(f"{0 if no_hits else len(text.splitlines())} matches")
+    elif name == "glob":
+        parts.append(f"{0 if no_hits else len(text.splitlines())} files")
+    elif name == "bash":
+        m = _EXIT_RE.search(text)
+        if m and m.group(1) != "0":
+            parts.append(f"exit {m.group(1)}")
+
+    if duration_s >= 1:
+        parts.append(f"{duration_s:.1f}s")
+    if offloaded:
+        parts.append(f"{result_chars / 1000:.1f}k chars · artifact {artifact_id}")
+
+    return "→ " + " · ".join(parts) if parts else ""
+
+
+# ---- transcript one-liners --------------------------------------------------
+
+def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True) -> str:
+    style = style_for(ev.name)
     if ev.subagent_id:
-        return f"  [dim]⏺ {ev.name}  {ev.args_preview}  ({ev.tier}·{ev.subagent_id})[/dim]"
-    return f"[dim]⏺ {ev.name}[/dim] [dim italic]{ev.args_preview}[/dim italic]"
+        suffix = f"  ({ev.tier}·{ev.subagent_id})" if show_subagent_suffix else ""
+        return f"  [dim]⏺ [{style}]{ev.name}[/{style}]  {ev.args_preview}{suffix}[/dim]"
+    return f"[{style}]⏺[/{style}] [bold {style}]{ev.name}[/bold {style}]  [italic]{ev.args_preview}[/italic]"
 
 
 def tool_end(ev: events.ToolEnd) -> str | None:
-    if not ev.offloaded:
-        return None
-    return f"  [dim]↳ offloaded → artifact {ev.artifact_id}[/dim]"
+    if ev.offloaded:
+        return f"  [dim]↳ {ev.outcome or f'offloaded → artifact {ev.artifact_id}'}[/dim]"
+    if ev.outcome.startswith("→ error") or (ev.name == "bash" and "exit" in ev.outcome):
+        return f"  [dim]{ev.outcome}[/dim]"
+    return None
 
 
 def subagent_spawned(ev: events.SubagentSpawned) -> str:
-    return f"[dim]⏺ subagent({ev.tier}) {ev.task_preview}  [{ev.subagent_id}][/dim]"
+    return (f"[green]⏺[/green] [bold green]subagent[/bold green]([green]{ev.tier}[/green]) "
+           f"{ev.task_preview}  [{ev.subagent_id}]")
 
 
 def subagent_done(ev: events.SubagentDone) -> str:
@@ -35,11 +227,11 @@ def compacted(ev: events.Compacted) -> str:
 
 
 def memory_write(ev: events.MemoryWrite) -> str:
-    return f"  [dim]◆ memory: {ev.type} '{ev.title}' ({ev.scope})[/dim]"
+    return f"  [blue]◆[/blue] [dim]memory: {ev.type} '{ev.title}' ({ev.scope})[/dim]"
 
 
 def memory_consolidated(ev: events.MemoryConsolidated) -> str:
-    return f"  [dim]◆ memory: {ev.summary}[/dim]"
+    return f"  [blue]◆[/blue] [dim]memory: {ev.summary}[/dim]"
 
 
 def error(ev: events.Error) -> str:

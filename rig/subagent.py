@@ -43,7 +43,10 @@ async def _subagent(task: str, tier: str = "fast") -> str:
         # only its tool activity is visible upward. ModelUsed is also
         # swallowed: it names the subagent's own tier model and would
         # otherwise stomp the top-level turn's status-bar model on emit.
-        if not isinstance(ev, events.TextDelta | events.Done | events.ModelUsed):
+        # Phase is swallowed too -- the subagent's own waiting/thinking/
+        # streaming churn is not the top-level turn's phase; the parent
+        # stays in "tools" for the whole duration of the subagent call.
+        if not isinstance(ev, events.TextDelta | events.Done | events.ModelUsed | events.Phase):
             emit(ev)
 
     emit(events.SubagentSpawned(subagent_id=subagent_id, tier=tier,

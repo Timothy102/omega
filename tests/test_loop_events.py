@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from rig import artifacts, events, llm, loop, tools
+from rig import artifacts, config, events, llm, loop, tools
 from rig.llm import ToolCall, Turn
 
 
@@ -56,13 +56,19 @@ async def test_emits_tool_start_end_text_done_in_order(tmp_path, monkeypatch):
 
     assert result == "done!"
     assert [type(e) for e in received] == [
-        events.ModelUsed, events.ToolStart, events.ToolEnd, events.Usage,
-        events.TextDelta, events.Done]
+        events.ModelUsed, events.Phase, events.ToolStart, events.Phase, events.ToolEnd,
+        events.Usage, events.Phase, events.Phase, events.TextDelta, events.Done, events.Phase]
 
-    _model_used, start, end, _usage, delta, done = received
+    (_model_used, phase1, start, phase_tools, end, _usage,
+     phase2, phase3, delta, done, phase4) = received
+    assert phase1.state == "waiting"
     assert start.call_id == "call_1" and start.name == "read"
-    assert start.args_preview == str(target)[:60]
+    assert start.args_preview == "read  small.txt"
     assert start.subagent_id is None and start.tier is None
+    assert phase_tools.state == "tools"
+    assert phase2.state == "waiting"
+    assert phase3.state == "streaming"
+    assert phase4.state == "idle"
     assert end.call_id == "call_1" and end.name == "read"
     assert end.offloaded is False and end.artifact_id is None
     assert end.duration_s >= 0
@@ -142,3 +148,27 @@ async def test_usage_emitted_with_role_context_as_limit(tmp_path, monkeypatch):
     assert usage.limit == FakeRole.context
     assert usage.prompt_tokens == 100 and usage.completion_tokens == 20
     assert usage.used == 120
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_matches_selected_model_context(tmp_path, monkeypatch):
+    """Regression guard: selecting a model via `/model` must carry that
+    model's own context window into `Usage.limit`, not some other role's --
+    `fable`'s 1048576 must never be reported as the dataclass default 128000."""
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = config.load()
+    call = ToolCall(id="call_1", name="bash", arguments=json.dumps({"command": "pwd"}))
+
+    rounds = [
+        [("tool", call), ("done", Turn(text="", tool_calls=[call],
+                                       prompt_tokens=100, completion_tokens=50))],
+        [("done", Turn(text="ok", tool_calls=[]))],
+    ]
+    monkeypatch.setattr(llm, "stream", scripted_stream(rounds))
+
+    received: list = []
+    history = [{"role": "user", "content": "hi"}]
+    await loop.run_turn(cfg, history, mode="build", emit=received.append, model="fable")
+
+    usage = next(e for e in received if isinstance(e, events.Usage))
+    assert usage.limit == 1048576

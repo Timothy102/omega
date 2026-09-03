@@ -9,7 +9,9 @@ from openai import AsyncOpenAI
 from .config import Role
 from .session import Message
 
-StreamEvent = tuple[Literal["text"], str] | tuple[Literal["tool"], "ToolCall"] | tuple[Literal["done"], "Turn"]
+PhaseState = Literal["thinking", "streaming"]
+StreamEvent = (tuple[Literal["text"], str] | tuple[Literal["tool"], "ToolCall"]
+              | tuple[Literal["done"], "Turn"] | tuple[Literal["phase"], PhaseState])
 
 # The array-form fallback header would also work, but the scalar "default" mode
 # picks Anthropic's recommended fallback per refusal category instead of
@@ -267,14 +269,31 @@ async def _stream_anthropic(role: Role, messages: list[Message],
 
     turn = Turn(model=role.model)
     pending_tools: dict[int, ToolCall] = {}
+    in_thinking = False
 
     client = _anthropic_client_for(role)
     async with client.beta.messages.stream(**kwargs) as anthropic_stream:
         async for event in anthropic_stream:
-            if event.type == "content_block_start" and event.content_block.type == "tool_use":
-                pending_tools[event.index] = ToolCall(id=event.content_block.id, name=event.content_block.name)
+            if event.type == "content_block_start":
+                if event.content_block.type in ("thinking", "redacted_thinking"):
+                    if not in_thinking:
+                        in_thinking = True
+                        yield "phase", "thinking"
+                else:
+                    if in_thinking:
+                        in_thinking = False
+                        yield "phase", "streaming"
+                    if event.content_block.type == "tool_use":
+                        pending_tools[event.index] = ToolCall(
+                            id=event.content_block.id, name=event.content_block.name)
             elif event.type == "content_block_delta":
-                if event.delta.type == "text_delta":
+                if event.delta.type == "thinking_delta" and not in_thinking:
+                    in_thinking = True
+                    yield "phase", "thinking"
+                elif event.delta.type == "text_delta":
+                    if in_thinking:
+                        in_thinking = False
+                        yield "phase", "streaming"
                     turn.text += event.delta.text
                     yield "text", event.delta.text
                 elif event.delta.type == "input_json_delta":

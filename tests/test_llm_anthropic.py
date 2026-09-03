@@ -231,6 +231,37 @@ async def test_refusal_maps_finish_reason_and_appends_note(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_thinking_block_yields_phase_events_around_it(monkeypatch):
+    role = make_role()
+    events_seq = [
+        FakeEvent(type="content_block_start", index=0, content_block=FakeBlock("thinking")),
+        FakeEvent(type="content_block_delta", index=0,
+                 delta=FakeDelta(type="thinking_delta", text="mulling it over...")),
+        FakeEvent(type="content_block_stop", index=0),
+        FakeEvent(type="content_block_start", index=1, content_block=FakeBlock("text")),
+        FakeEvent(type="content_block_delta", index=1,
+                 delta=FakeDelta(type="text_delta", text="Hello")),
+        FakeEvent(type="content_block_stop", index=1),
+    ]
+    final = FakeFinalMessage(
+        content=[FakeBlock("thinking", thinking_text="mulling it over...", signature="sig"),
+                FakeBlock("text")],
+        usage=FakeUsage(input_tokens=10, output_tokens=5, cache_read_input_tokens=0),
+        stop_reason="end_turn", model="claude-opus-5")
+    fake_client = FakeAnthropicClient(FakeAnthropicStream(events_seq, final))
+    monkeypatch.setitem(llm._anthropic_clients, role.provider.name, fake_client)
+
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    received = [ev async for ev in llm.stream(role, messages)]
+
+    kinds = [k for k, _ in received]
+    assert kinds == ["phase", "phase", "text", "done"]
+    assert received[0] == ("phase", "thinking")
+    assert received[1] == ("phase", "streaming")
+    assert received[2] == ("text", "Hello")
+
+
+@pytest.mark.asyncio
 async def test_fable_model_omits_thinking_param(monkeypatch):
     role = make_role(model="claude-fable-5-1", effort="xhigh")
     fake_client = make_fake_client()

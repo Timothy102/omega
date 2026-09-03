@@ -1,13 +1,20 @@
-"""First-run terminal onboarding: a fast path to a working `~/.rig/config.json`
-for someone with no config yet or no usable key for the `main` role, without
-requiring the full browser flow (`rig setup`). Re-runnable via `rig onboard`."""
+"""First-run setup: get `~/.rig/config.json` into a working state without
+the full browser flow (`rig setup`). `run()` picks the Textual wizard on a
+real terminal and falls back to `run_plain()` (the original `input()` flow)
+otherwise; both share the provider presets, catalog, and config-merge logic
+in this module. No Textual imports here -- `rig/ui/tui/onboarding.py` is the
+only place that knows about widgets."""
 import asyncio
 import getpass
+import sys
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from . import config, loop
-from .setup_server import PROBE_PROMPT, _save
+from .setup_server import PROBE_PROMPT as PROBE_PROMPT
+from .setup_server import _save
 
 Body = dict[str, Any]
 
@@ -36,11 +43,108 @@ _OPENROUTER = _Choice(
     provider_key="openrouter",
     provider={"type": "openai", "baseUrl": "https://openrouter.ai/api/v1", "apiKey": ""},
     catalog={
+        "spark": {"model": "meta/muse-spark-1.3", "provider": "openrouter", "context": 1048576},
         "kimi": {"model": "moonshotai/kimi-k3", "provider": "openrouter", "context": 1048576},
         "glm": {"model": "z-ai/glm-5.3-flash", "provider": "openrouter", "context": 128000},
     },
-    default_alias="kimi", cheap_alias="glm",
+    default_alias="spark", cheap_alias="glm",
 )
+
+# USD per million tokens, (input, output) -- shown in the model picker.
+PRICES: dict[str, tuple[float, float]] = {
+    "fable": (10, 50), "opus": (5, 25), "sonnet": (2, 10), "haiku": (1, 5),
+    "spark": (1.25, 4.25), "kimi": (3, 15), "glm": (0.6, 2.2),
+}
+
+PURPOSES: dict[str, str] = {
+    "fable": "hardest problems, deepest reasoning",
+    "opus": "best for coding (recommended)",
+    "sonnet": "fast and strong",
+    "haiku": "cheapest, quick tasks",
+    "spark": "Meta's frontier — strong at agentic coding, cheap",
+    "kimi": "strong open-weights, 1M context",
+    "glm": "cheap and fast",
+}
+
+# provider_key -> (label, one-liner, env var checked for "key found in environment")
+PROVIDER_INFO: list[tuple[str, str, str, str]] = [
+    ("anthropic", "Anthropic  — Claude (recommended)",
+     "Native Anthropic API access -- fable, opus, sonnet, haiku.", "ANTHROPIC_API_KEY"),
+    ("openrouter", "OpenRouter  — Claude, Kimi, GLM, GPT, Gemini and 200+ more",
+     "One key, hundreds of models, pay-as-you-go.", "OPENROUTER_API_KEY"),
+    ("other", "Other OpenAI-compatible  — any /chat/completions endpoint",
+     "Bring your own base URL: local models, other clouds, self-hosted.", ""),
+]
+
+
+def env_var_for(provider_key: str) -> str:
+    for key, _label, _desc, env in PROVIDER_INFO:
+        if key == provider_key or (key == "other" and provider_key == "custom"):
+            return env
+    return ""
+
+
+def choice_for(provider_key: str, base_url: str = "") -> _Choice:
+    if provider_key == "anthropic":
+        return _ANTHROPIC
+    if provider_key == "openrouter":
+        return _OPENROUTER
+    return _Choice(provider_key="custom", provider={"type": "openai", "baseUrl": base_url, "apiKey": ""},
+                  catalog={}, default_alias="", cheap_alias="")
+
+
+def build_config(choice: _Choice, main_alias: str, cheap_alias: str, models: dict[str, Body]) -> Body:
+    """Merge this choice into whatever config already exists on disk --
+    onboarding's own six roles win, everything else in the file is untouched."""
+    raw = config._json_or_default()
+    raw.setdefault("providers", {})[choice.provider_key] = choice.provider
+    raw.setdefault("models", {}).update(models)
+    roles = raw.setdefault("roles", {})
+    roles["main"] = {"alias": main_alias}
+    roles["plan"] = {"alias": main_alias}
+    roles["subagent_mid"] = {"alias": main_alias}
+    roles["subagent_fast"] = {"alias": cheap_alias}
+    roles["compact"] = {"alias": cheap_alias}
+    roles["memory"] = {"alias": cheap_alias}
+    return raw
+
+
+def save_config(raw: Body) -> None:
+    _save(raw)
+
+
+async def validate_key(choice: _Choice, key: str) -> tuple[bool, str]:
+    """Probe that `key` actually works for `choice`'s provider. Returns
+    (ok, message) -- message is "connected" on success or a short error."""
+    if choice.provider.get("type") == "anthropic":
+        from anthropic import AsyncAnthropic
+        try:
+            client = AsyncAnthropic(api_key=key)
+            await client.models.list(limit=1)
+            return True, "connected"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"[:120]
+
+    base = (choice.provider.get("baseUrl") or "").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=15) as http_client:
+            r = await http_client.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"})
+        if r.status_code != 200:
+            return False, f"HTTP {r.status_code}: {r.text[:100]}"
+        return True, "connected"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"[:120]
+
+
+async def run() -> bool:
+    """Entry point for both `rig onboard` and the first-run gate: the
+    Textual wizard on a real terminal, the original `input()` flow otherwise
+    (piped/scripted invocations, or a dumb terminal)."""
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        from .ui.tui.onboarding import OnboardingApp
+        return bool(await OnboardingApp().run_async())
+    await run_plain()
+    return config.CONFIG_PATH.exists()
 
 
 async def _ask(prompt: str) -> str:
@@ -59,7 +163,7 @@ async def _ask_choice(prompt: str, options: list[str], default: int = 1) -> int:
     return default
 
 
-async def run() -> None:
+async def run_plain() -> None:
     print("rig needs a model to drive it -- let's set one up (`rig setup` opens the full browser flow).")
     pick = await _ask_choice("Pick a provider:",
                              ["Anthropic (native)", "OpenRouter", "Other OpenAI-compatible"])
@@ -70,9 +174,7 @@ async def run() -> None:
         choice = _OPENROUTER
     else:
         base_url = await _ask("Base URL (e.g. https://api.example.com/v1): ")
-        choice = _Choice(
-            provider_key="custom", provider={"type": "openai", "baseUrl": base_url, "apiKey": ""},
-            catalog={}, default_alias="", cheap_alias="")
+        choice = choice_for("other", base_url)
 
     key = await asyncio.to_thread(getpass.getpass, "API key (hidden): ")
     choice.provider["apiKey"] = key
@@ -90,17 +192,7 @@ async def run() -> None:
         main_alias = cheap_alias = "main-model"
         models = {main_alias: {"model": model_id, "provider": choice.provider_key, "context": 128000}}
 
-    raw = config._json_or_default()
-    raw.setdefault("providers", {})[choice.provider_key] = choice.provider
-    raw.setdefault("models", {}).update(models)
-    roles = raw.setdefault("roles", {})
-    roles["main"] = {"alias": main_alias}
-    roles["plan"] = {"alias": main_alias}
-    roles["subagent_mid"] = {"alias": main_alias}
-    roles["subagent_fast"] = {"alias": cheap_alias}
-    roles["compact"] = {"alias": cheap_alias}
-    roles["memory"] = {"alias": cheap_alias}
-    _save(raw)
+    save_config(build_config(choice, main_alias, cheap_alias, models))
     print(f"wrote {config.CONFIG_PATH}")
 
     print("\nrunning a test turn...")

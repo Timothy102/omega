@@ -30,7 +30,7 @@ async def test_onboard_anthropic_writes_working_config(monkeypatch):
     queue_getpass(monkeypatch, "sk-ant-test")
     monkeypatch.setattr(loop, "run_agent", fake_run_agent)
 
-    await onboarding.run()
+    await onboarding.run_plain()
 
     data = json.loads(config.CONFIG_PATH.read_text())
     assert data["providers"]["anthropic"] == {"type": "anthropic", "apiKey": "sk-ant-test"}
@@ -49,20 +49,20 @@ async def test_onboard_anthropic_writes_working_config(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_onboard_openrouter_writes_working_config(monkeypatch):
-    queue_input(monkeypatch, ["2", ""])  # provider: OpenRouter; model: default (kimi)
+    queue_input(monkeypatch, ["2", ""])  # provider: OpenRouter; model: default (spark)
     queue_getpass(monkeypatch, "or-test-key")
     monkeypatch.setattr(loop, "run_agent", fake_run_agent)
 
-    await onboarding.run()
+    await onboarding.run_plain()
 
     data = json.loads(config.CONFIG_PATH.read_text())
     assert data["providers"]["openrouter"]["baseUrl"] == "https://openrouter.ai/api/v1"
-    assert data["models"]["kimi"]["model"] == "moonshotai/kimi-k3"
-    assert data["roles"]["main"] == {"alias": "kimi"}
+    assert data["models"]["spark"]["model"] == "meta/muse-spark-1.3"
+    assert data["roles"]["main"] == {"alias": "spark"}
     assert data["roles"]["subagent_fast"] == {"alias": "glm"}
 
     cfg = config.load()
-    assert cfg.role("main").model == "moonshotai/kimi-k3"
+    assert cfg.role("main").model == "meta/muse-spark-1.3"
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ async def test_onboard_other_openai_compatible_asks_for_url_and_model(monkeypatc
     queue_getpass(monkeypatch, "example-key")
     monkeypatch.setattr(loop, "run_agent", fake_run_agent)
 
-    await onboarding.run()
+    await onboarding.run_plain()
 
     data = json.loads(config.CONFIG_PATH.read_text())
     assert data["providers"]["custom"]["baseUrl"] == "https://api.example.com/v1"
@@ -97,7 +97,7 @@ async def test_onboard_merges_into_existing_config(monkeypatch, tmp_path):
     queue_getpass(monkeypatch, "sk-ant-test")
     monkeypatch.setattr(loop, "run_agent", fake_run_agent)
 
-    await onboarding.run()
+    await onboarding.run_plain()
 
     data = json.loads(config.CONFIG_PATH.read_text())
     assert data["providers"]["inference-net"]["baseUrl"] == "https://api.inference.net/v1"
@@ -119,6 +119,6 @@ async def test_onboard_survives_probe_failure(monkeypatch):
 
     monkeypatch.setattr(loop, "run_agent", failing_run_agent)
 
-    await onboarding.run()  # must not raise
+    await onboarding.run_plain()  # must not raise
 
     assert config.CONFIG_PATH.exists()

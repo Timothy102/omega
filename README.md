@@ -152,10 +152,12 @@ rig --yolo "..."                 # skip permission prompts
 ```
 
 The first time rig runs with no `~/.rig/config.json`, or with no usable key
-for `main`, it walks you through a short interactive setup right in the
-terminal instead of exiting — pick a provider, paste a key, pick a model, and
-it runs one real turn to prove it works. `rig setup` opens the fuller browser
-flow (multiple roles, MCP servers, latency benchmarking) any time after.
+for `main`, it launches a small Textual wizard instead of exiting — pick a
+provider, paste (or auto-detect) a key, pick a model, and it runs one real
+turn live in the wizard to prove it works, then drops you straight into the
+TUI. Piped or non-interactive invocations get the original plain `input()`
+prompts instead. `rig setup` opens the fuller browser flow (multiple roles,
+MCP servers, latency benchmarking) any time after.
 
 In the TUI: `/plan` and `/build` switch modes, `/model` picks a model,
 `/memory-gc` consolidates memory, `/quit` or ctrl-d exits, ctrl-c abandons
