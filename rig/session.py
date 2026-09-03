@@ -4,8 +4,13 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 DIR = Path.home() / ".rig" / "sessions"
+
+# Shared with __main__'s resumed-session marker so UIs can identify and
+# exclude it from turn/message counts shown to the user.
+RESUME_PREFIX = "[session resumed"
 
 
 @dataclass
@@ -45,6 +50,16 @@ class Session:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=1))
         tmp.replace(self.path)
+
+    def close_turn(self, history: list[dict[str, Any]], mode: str, interrupted: bool) -> None:
+        """Shared by every UI: whatever ran the turn, the session must land in
+        the same state afterwards."""
+        self.mode = mode
+        repair(history)
+        if interrupted:
+            history.append({"role": "user",
+                            "content": "[previous turn interrupted by user]"})
+        self.save()
 
 
 def load(sid: str) -> Session:

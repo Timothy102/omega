@@ -1,4 +1,11 @@
 from dataclasses import dataclass
+from typing import TypedDict
+
+
+class Option(TypedDict, total=False):
+    """An `ask_user` choice, as passed to `tools.ASK_USER` and rendered by both UIs."""
+    label: str
+    description: str
 
 
 @dataclass(frozen=True)
@@ -66,5 +73,13 @@ class Done:
     text: str
 
 
+@dataclass(frozen=True)
+class Usage:
+    prompt_tokens: int
+    completion_tokens: int
+    used: int
+    limit: int
+
+
 Event = (TextDelta | ToolStart | ToolEnd | Compacted | MemoryWrite |
-         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done)
+         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage)

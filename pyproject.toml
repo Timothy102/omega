@@ -11,13 +11,18 @@ requires-python = ">=3.11"
 dependencies = [
     "openai>=2,<3",
     "mcp>=1.9,<2",
-    "prompt_toolkit>=3,<4",
     "rich>=13,<15",
-    "httpx>=0.27,<1",     # used directly by setup_server; was only transitive
+    "httpx>=0.27,<1", # used directly by setup_server; was only transitive
+    "textual>=8.2.8",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
 
 [project.scripts]
 rig = "rig.__main__:cli"
@@ -39,3 +44,14 @@ select = ["E", "F", "W", "I", "B", "UP"]
 # E401: stdlib imports are deliberately grouped on one line.
 # E741: `S`/`I` are the tool-schema shorthands used throughout tools.py.
 ignore = ["E401", "E741"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["rig/ui", "rig/events.py"]
+
+# plain.py predates strict typing and isn't being rewritten here; only the new
+# tui/ package and events.py are held to --strict.
+[[tool.mypy.overrides]]
+module = "rig.ui.plain"
+ignore_errors = true

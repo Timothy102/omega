@@ -2,7 +2,7 @@ import asyncio
 
 from rich.console import Console
 
-from .. import events, loop, permissions, session
+from .. import events, loop, permissions
 
 console = Console()
 
@@ -83,6 +83,8 @@ def render(ev: events.Event):
             console.print(f"\n[red]error:[/red] {message}", highlight=False)
         case events.Done():
             pass
+        case events.Usage():
+            pass
 
 
 async def run_prompt(cfg, history, prompt, mode, sess=None):
@@ -106,13 +108,8 @@ async def run_prompt(cfg, history, prompt, mode, sess=None):
         console.print(f"\n[red]error:[/red] {type(e).__name__}: {e}")
     finally:
         if sess:
-            sess.mode = mode
-            session.repair(history)
-            if interrupted:
-                history.append({"role": "user",
-                                "content": "[previous turn interrupted by user]"})
             try:
-                sess.save()
+                sess.close_turn(history, mode, interrupted)
             except Exception as e:
                 console.print(f"[red]could not save session:[/red] {e}")
     console.print()

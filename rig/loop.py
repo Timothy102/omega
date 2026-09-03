@@ -133,6 +133,9 @@ async def run_agent(cfg, role_name, system, history, tool_names=None,
             used = (turn.prompt_tokens + turn.completion_tokens
                     if turn.prompt_tokens
                     else compact.estimate_tokens(history) + overhead)
+            emit(events.Usage(prompt_tokens=turn.prompt_tokens,
+                              completion_tokens=turn.completion_tokens,
+                              used=used, limit=role.context))
             note = await compact.maybe_compact(cfg, history, used, role.context)
             if note:
                 emit(events.Compacted(note))

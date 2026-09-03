@@ -49,9 +49,9 @@ async def test_emits_tool_start_end_text_done_in_order(tmp_path, monkeypatch):
 
     assert result == "done!"
     assert [type(e) for e in received] == [
-        events.ToolStart, events.ToolEnd, events.TextDelta, events.Done]
+        events.ToolStart, events.ToolEnd, events.Usage, events.TextDelta, events.Done]
 
-    start, end, delta, done = received
+    start, end, _usage, delta, done = received
     assert start.call_id == "call_1" and start.name == "read"
     assert start.args_preview == str(target)[:60]
     assert start.subagent_id is None and start.tier is None
@@ -110,3 +110,27 @@ async def test_subagent_id_and_tier_stamped_on_tool_events(tmp_path, monkeypatch
     # ToolEnd carries no subagent_id/tier fields per the event schema -- only
     # ToolStart does; this test just confirms run_agent accepts the kwargs.
     assert end.call_id == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_usage_emitted_with_role_context_as_limit(tmp_path, monkeypatch):
+    target = tmp_path / "small.txt"
+    target.write_text("hi")
+    call = ToolCall(id="call_1", name="read",
+                    arguments=json.dumps({"path": str(target)}))
+
+    rounds = [
+        [("tool", call), ("done", Turn(text="", tool_calls=[call],
+                                       prompt_tokens=100, completion_tokens=20))],
+        [("done", Turn(text="ok", tool_calls=[]))],
+    ]
+    monkeypatch.setattr(llm, "stream", scripted_stream(rounds))
+
+    received: list = []
+    history = [{"role": "user", "content": "hi"}]
+    await loop.run_agent(FakeCfg(), "main", "sys", history, emit=received.append)
+
+    usage = next(e for e in received if isinstance(e, events.Usage))
+    assert usage.limit == FakeRole.context
+    assert usage.prompt_tokens == 100 and usage.completion_tokens == 20
+    assert usage.used == 120

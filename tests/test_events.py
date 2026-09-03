@@ -78,5 +78,5 @@ def test_event_type_alias_covers_all_variants():
     args = set(typing.get_args(events.Event))
     expected = {events.TextDelta, events.ToolStart, events.ToolEnd, events.Compacted,
                 events.MemoryWrite, events.MemoryConsolidated, events.SubagentSpawned,
-                events.SubagentDone, events.Error, events.Done}
+                events.SubagentDone, events.Error, events.Done, events.Usage}
     assert args == expected
