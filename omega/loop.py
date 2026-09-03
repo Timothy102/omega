@@ -5,11 +5,40 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, cast
 
-from . import compact, events, gitlog, instructions, llm, mcp, memory, session, skills, subagent, tools, trajectory
+from . import (
+    checkpoint,
+    compact,
+    events,
+    gitlog,
+    instructions,
+    llm,
+    mcp,
+    memory,
+    session,
+    skills,
+    subagent,
+    tools,
+    trajectory,
+    verify,
+)
 from .config import Config, Role
 from .llm import ToolCall, Turn
 from .session import Message
 from .ui import format
+
+# A round's write/edit tool always counts as a mutation; a bash command only
+# counts on this heuristic (no sandboxed way to know what a shell command
+# touched without actually diffing the tree, which is exactly what checkpoint
+# diffing after the fact is for).
+_MUTATING_BASH_MARKERS = (">", "sed -i", " mv ", " rm ", "git checkout")
+
+# One initial check plus this many retries after a `[verification]` failure
+# message before the turn gives up and reports the failure in its final text.
+VERIFY_MAX_FIXES = 2
+
+# Below this many changed (+/-) diff lines, an automatic review verdict adds
+# noise more than value -- see subagent.review().
+REVIEW_MIN_CHANGED_LINES = 30
 
 BUILD_SYSTEM = """You are omega, a terminal coding agent.
 
@@ -126,6 +155,37 @@ def _args_preview(call: ToolCall) -> str:
         return ""
 
 
+def _tool_mutates(call: ToolCall) -> bool:
+    if call.name in ("write", "edit"):
+        return True
+    if call.name != "bash":
+        return False
+    try:
+        command = call.args().get("command", "")
+    except ValueError:
+        return False
+    return any(marker in command for marker in _MUTATING_BASH_MARKERS)
+
+
+def _changed_line_count(diff_text: str) -> int:
+    return sum(1 for line in diff_text.splitlines()
+              if (line.startswith("+") or line.startswith("-"))
+              and not line.startswith(("+++", "---")))
+
+
+def _first_user_request(history: list[Message]) -> str:
+    for m in history:
+        if m.get("role") == "user":
+            content = m.get("content")
+            return content if isinstance(content, str) else ""
+    return ""
+
+
+def _verify_failure_message(results: list[verify.Result]) -> str:
+    return "\n\n".join(f"[verification] {r.check.name}: exit {r.exit_code}\n{r.tail}"
+                       for r in results if not r.ok)
+
+
 def _cwd_line() -> str:
     """Computed once per process: the cwd and (if any) its git branch never
     change mid-session, so this belongs in the stable half of the prompt."""
@@ -183,14 +243,23 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
                     tool_names: set[str] | None = None,
                     emit: Callable[[events.Event], None] | None = None,
                     max_rounds: int = 60, subagent_id: str | None = None,
-                    tier: str | None = None, role: Role | None = None) -> str:
+                    tier: str | None = None, role: Role | None = None,
+                    verify_enabled: bool = False, turn_number: int | None = None) -> str:
     """`system` is the STABLE half of the prompt -- see VOLATILE_MARKER. The
     volatile half is appended fresh every round since it reflects tool calls
-    made during this very call."""
+    made during this very call.
+
+    `verify_enabled` gates the whole B1 edit-safety tail (checkpoint-backed
+    verification + review) -- it is True only for a top-level BUILD-mode turn
+    (set by run_turn); plan/discuss turns and every subagent call (including
+    subagent.review's own recursive run_agent call) leave it False."""
     emit = emit or (lambda _e: None)
     role = role or cfg.role(role_name)
     emit(events.ModelUsed(alias=role.alias, model=role.model, provider=role.provider.name))
     schemas = tools.schemas(tool_names)
+    mutated = False
+    verify_attempts = 0
+    reviewed = False
 
     for _ in range(max_rounds):
         full_system = f"{system}{VOLATILE_MARKER}{_volatile_block(history)}"
@@ -243,9 +312,46 @@ async def run_agent(cfg: Config, role_name: str, system: str, history: list[Mess
         history.append(assistant_message)
         _log_turn_message(assistant_message)
         if not turn.tool_calls:
-            emit(events.Done(turn.text))
+            final_text = turn.text
+            verify_ok = True
+
+            if verify_enabled and cfg.verify_auto and mutated and verify_attempts <= VERIFY_MAX_FIXES:
+                checks = verify.resolve(os.getcwd(), cfg.verify_checks)
+                if checks:
+                    results_v = verify.run(checks, os.getcwd())
+                    verify_ok = all(r.ok for r in results_v)
+                    emit(events.Verified(results_summary=verify.summarize(results_v), ok=verify_ok))
+                    if not verify_ok:
+                        if verify_attempts < VERIFY_MAX_FIXES:
+                            verify_attempts += 1
+                            fail_message: Message = {"role": "user",
+                                                     "content": _verify_failure_message(results_v)}
+                            history.append(fail_message)
+                            _log_turn_message(fail_message)
+                            continue
+                        verify_attempts += 1  # exhausted -- stop retrying, report and move on
+                        final_text = (f"{final_text}\n\n[verification] still failing after "
+                                     f"{VERIFY_MAX_FIXES} fix attempt(s):\n"
+                                     f"{_verify_failure_message(results_v)}")
+
+            if (verify_enabled and cfg.review_auto and mutated and verify_ok and not reviewed
+                    and tools.SESSION_ID is not None and turn_number is not None):
+                diff_text = checkpoint.diff(tools.SESSION_ID, since_turn=turn_number)
+                if _changed_line_count(diff_text) > REVIEW_MIN_CHANGED_LINES:
+                    reviewed = True
+                    verdict = await subagent.review(cfg, _first_user_request(history), diff_text, emit)
+                    if verdict.strip().upper() != "OK":
+                        review_message: Message = {"role": "user", "content": f"[review] {verdict}"}
+                        history.append(review_message)
+                        _log_turn_message(review_message)
+                        continue
+
+            emit(events.Done(final_text))
             emit(events.Phase("idle"))
-            return turn.text
+            return final_text
+
+        if verify_enabled:
+            mutated = mutated or any(_tool_mutates(call) for call, _, _ in dispatched)
 
         emit(events.Phase("tools"))
         results = await asyncio.gather(*(t for _, t, _ in dispatched))
@@ -291,6 +397,8 @@ async def run_turn(cfg: Config, history: list[Message], mode: str = "build",
     tools.set_tainted(False)
     tools.reset_turn_budget()
     subagent.EMIT = emit
+    tools.EMIT = emit
+    tools.HOOK_RULES = cfg.hooks
     system, tool_names = MODES[mode]
     # Snapshot once per process: `remember` changes what curate.preamble()
     # returns, and a changing system prompt invalidates the provider's prefix
@@ -315,5 +423,16 @@ async def run_turn(cfg: Config, history: list[Message], mode: str = "build",
     # discuss shares plan's role: both are read-only reasoning-heavy modes,
     # and no separate config entry exists (or is needed) for a third one.
     role_name = "main" if mode == "build" else "plan"
-    return await run_agent(cfg, role_name, stable, history, tool_names,
-                           emit, role=role)
+
+    # Turn number = count of user messages already in history, since the
+    # caller appends the new prompt before calling run_turn -- matches
+    # session.Session.turns and tags the checkpoint the same way undo()/
+    # diff() will look it up later.
+    turn_number = sum(1 for m in history if m.get("role") == "user")
+    if mode == "build" and tools.SESSION_ID is not None:
+        cp = checkpoint.create(tools.SESSION_ID, turn_number)
+        if cp is not None:
+            (emit or (lambda _e: None))(events.Checkpoint(turn=cp.turn, id=cp.id))
+
+    return await run_agent(cfg, role_name, stable, history, tool_names, emit, role=role,
+                           verify_enabled=(mode == "build"), turn_number=turn_number)

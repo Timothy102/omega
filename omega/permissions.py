@@ -109,7 +109,7 @@ def decide(name: str, args: dict[str, Any], cwd: str | None = None,
         return ALLOW, "allowed by a saved rule"
 
     if name in ("read", "grep", "glob", "recall", "find_tools", "subagent",
-                "fetch_result", "list_artifacts", "ask_user", "skill"):
+                "fetch_result", "list_artifacts", "ask_user", "skill", "bash_status"):
         return ALLOW, "read-only"
 
     if name in ("save_artifact", "update_artifact", "remember", "supersede", "link"):

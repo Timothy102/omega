@@ -2,17 +2,20 @@ import asyncio
 import inspect
 import os
 import re
+import secrets
 import shutil as _shutil
 import signal
 import subprocess
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
-from . import mcp, permissions
+from . import events, hooks, mcp, permissions
+from .config import HookRule
 from .events import Option
 from .llm import ToolCall
 
@@ -59,6 +62,33 @@ SESSION_ID: str | None = None
 
 # Set by the CLI. None means no interactive session (scripted / --yolo).
 ASK_USER: Callable[[str, list[Option], bool], Awaitable[str]] | None = None
+
+# Set by run_turn from cfg.hooks. Empty dict means no hooks configured.
+HOOK_RULES: dict[str, list[HookRule]] = {}
+
+# Set by run_turn, mirroring subagent.EMIT -- lets background-job lifecycle
+# events reach the UI without threading an emit callback through every tool.
+EMIT: Callable[[events.Event], None] | None = None
+
+# ~/.omega/sessions -- a session's background-job logs live under
+# <JOBS_DIR>/<session id>/jobs/<job id>.log. A separate module attribute (not
+# shared with session.DIR/artifacts.DIR) so tests can monkeypatch it in isolation.
+JOBS_DIR = Path.home() / ".omega" / "sessions"
+
+
+@dataclass
+class Job:
+    id: str
+    command: str
+    proc: subprocess.Popen[bytes]
+    log_path: Path
+    started: float
+    finished: bool = False
+    exit_code: int | None = None
+
+
+_JOBS: dict[str, Job] = {}
+_JOBS_LOCK = threading.Lock()
 
 
 def set_tainted(value: bool) -> None:
@@ -118,7 +148,7 @@ def tool(name: str, description: str, params: dict[str, Any], required: list[str
 
 
 READ_ONLY = {"read", "grep", "glob", "recall", "subagent", "find_tools", "call_tool",
-             "fetch_result", "list_artifacts", "ask_user", "skill"}
+             "fetch_result", "list_artifacts", "ask_user", "skill", "bash_status"}
 
 # Tiny confirmations, or themselves the retrieval path -- offloading
 # fetch_result's own output would be an infinite regress.
@@ -180,9 +210,14 @@ def _edit(path: str, old: str, new: str) -> str:
     return f"edited {p}"
 
 
-@tool("bash", "Run a shell command. Returns combined stdout+stderr.",
-      {"command": S, "timeout": I}, ["command"], mutates=True)
-def _bash(command: str, timeout: int | None = 120) -> str:
+@tool("bash", "Run a shell command. Returns combined stdout+stderr. Pass "
+      "background=true for a long-running command (a server, a watch loop) -- it "
+      "starts the process and returns immediately with a job id; poll it with "
+      "bash_status(id).",
+      {"command": S, "timeout": I, "background": {"type": "boolean"}}, ["command"], mutates=True)
+def _bash(command: str, timeout: int | None = 120, background: bool = False) -> str:
+    if background:
+        return _bash_background(command)
     # start_new_session puts the child in its own process group, so a timeout
     # can kill the whole tree; subprocess.run would only kill the shell and
     # leave its children running forever.
@@ -229,6 +264,75 @@ def _kill_group(pgid: int) -> None:
             except (ProcessLookupError, PermissionError):
                 return
             time.sleep(0.25)
+
+
+def _jobs_dir() -> Path:
+    d = JOBS_DIR / (SESSION_ID or "no-session") / "jobs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _bash_background(command: str) -> str:
+    job_id = secrets.token_hex(3)
+    log_path = _jobs_dir() / f"{job_id}.log"
+    log_file = log_path.open("wb")
+    try:
+        proc = subprocess.Popen(command, shell=True, stdout=log_file, stderr=subprocess.STDOUT,
+                                cwd=os.getcwd(), start_new_session=True)
+    except OSError as e:
+        log_file.close()
+        return f"error: could not start background job: {e}"
+    job = Job(id=job_id, command=command, proc=proc, log_path=log_path, started=time.time())
+    with _JOBS_LOCK:
+        _JOBS[job_id] = job
+    if EMIT:
+        EMIT(events.JobStarted(id=job_id, command=command))
+    threading.Thread(target=_watch_job, args=(job, log_file), daemon=True).start()
+    return f"started background job {job_id} (pid {proc.pid}) -- check with bash_status({job_id!r})"
+
+
+def _watch_job(job: Job, log_file: BinaryIO) -> None:
+    code = job.proc.wait()
+    try:
+        log_file.close()
+    except OSError:
+        pass
+    with _JOBS_LOCK:
+        job.finished = True
+        job.exit_code = code
+    if EMIT:
+        EMIT(events.JobFinished(id=job.id, exit_code=code))
+
+
+def _tail_log(path: Path, lines: int = 40) -> str:
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return "(no output yet)"
+    return "\n".join(text.splitlines()[-lines:]) or "(no output yet)"
+
+
+def list_jobs() -> list[dict[str, Any]]:
+    """Background jobs started this process, running or finished -- used to
+    tell the user what's still going at session end (they are left running,
+    not killed: they're the user's own processes)."""
+    with _JOBS_LOCK:
+        return [{"id": j.id, "command": j.command, "finished": j.finished,
+                 "exit_code": j.exit_code, "pid": j.proc.pid} for j in _JOBS.values()]
+
+
+@tool("bash_status", "Check a background job started with bash(..., background=True): "
+      "running/finished state, exit code, and a tail of its output.",
+      {"id": S}, ["id"])
+def _bash_status(id: str) -> str:
+    with _JOBS_LOCK:
+        job = _JOBS.get(id)
+    if job is None:
+        return f"error: no background job {id!r}"
+    tail = _tail_log(job.log_path)
+    if job.finished:
+        return f"job {id}: finished, exit {job.exit_code}\n{tail}"
+    return f"job {id}: running (pid {job.proc.pid})\n{tail}"
 
 
 @tool("grep", "Search file contents by regex. Returns path:line:text.",
@@ -282,6 +386,14 @@ async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
                 ok = await CONFIRM(call.name, args, why)
             if not ok:
                 return "error: denied by user"
+
+        cwd = os.getcwd()
+        pre_rules = HOOK_RULES.get("pre_tool", [])
+        if pre_rules:
+            blocked, why = await asyncio.to_thread(hooks.run_pre, pre_rules, call.name, args, cwd)
+            if blocked:
+                return f"error: blocked by hook: {why}"
+
         fn = entry.fn
         call_it = ((lambda: fn(**args)) if inspect.iscoroutinefunction(fn)
                    else (lambda: asyncio.to_thread(fn, **args)))
@@ -295,6 +407,12 @@ async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
         return f"error: {type(e).__name__}: {e}"
 
     result = cast(str, result)
+    post_rules = HOOK_RULES.get("post_tool", [])
+    if post_rules:
+        appended = await asyncio.to_thread(hooks.run_post, post_rules, call.name, args, cwd, result)
+        if appended:
+            result = f"{result}\n{appended}"
+
     if call.name in _NO_OFFLOAD or SESSION_ID is None:
         return _cap_inline(result)
 

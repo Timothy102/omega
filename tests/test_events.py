@@ -79,7 +79,8 @@ def test_event_type_alias_covers_all_variants():
     expected = {events.TextDelta, events.ToolStart, events.ToolEnd, events.Compacted,
                 events.MemoryWrite, events.MemoryConsolidated, events.SubagentSpawned,
                 events.SubagentDone, events.Error, events.Done, events.Usage, events.ModelUsed,
-                events.Phase, events.Fallback}
+                events.Phase, events.Fallback, events.Checkpoint, events.Verified,
+                events.JobStarted, events.JobFinished}
     assert args == expected
 
 
@@ -102,3 +103,20 @@ def test_usage_cache_fields_set():
 def test_fallback_construction():
     e = events.Fallback(from_model="claude-opus-5", to_model="claude-sonnet-5", reason="529 overloaded")
     assert (e.from_model, e.to_model, e.reason) == ("claude-opus-5", "claude-sonnet-5", "529 overloaded")
+
+
+def test_checkpoint_construction():
+    e = events.Checkpoint(turn=2, id="ab12cd34")
+    assert (e.turn, e.id) == (2, "ab12cd34")
+
+
+def test_verified_construction():
+    e = events.Verified(results_summary="pytest ok; ruff ok", ok=True)
+    assert e.ok and "pytest" in e.results_summary
+
+
+def test_job_started_and_finished():
+    started = events.JobStarted(id="a1b2c3", command="sleep 1")
+    finished = events.JobFinished(id="a1b2c3", exit_code=0)
+    assert started.command == "sleep 1"
+    assert finished.exit_code == 0

@@ -98,11 +98,25 @@ class Role:
     fallback_alias: str | None = None
 
 
+@dataclass(frozen=True)
+class HookRule:
+    """One `hooks.json` entry: `command` runs (with OMEGA_* env vars) whenever a
+    call to one of `tools` is dispatched -- see hooks.py."""
+    tools: list[str]
+    command: str
+
+
 @dataclass
 class Config:
     roles: dict[str, Role] = field(default_factory=dict)
     models: dict[str, Model] = field(default_factory=dict)
     providers: dict[str, Provider] = field(default_factory=dict)
+    # B1 edit-safety config: read from top-level "verify"/"hooks"/"review_auto"
+    # keys in config.json -- see verify.py, hooks.py and subagent.review().
+    verify_auto: bool = True
+    verify_checks: list[str] | None = None
+    review_auto: bool = True
+    hooks: dict[str, list[HookRule]] = field(default_factory=dict)
 
     def role(self, name: str) -> Role:
         if name not in self.roles:
@@ -173,7 +187,22 @@ def load() -> Config:
             models[alias] = Model(alias, m["model"], m["provider"], m.get("context", 128000),
                                   m.get("effort"), m.get("fallback"))
 
-    cfg = Config(models=models, providers=providers)
+    verify_raw = raw.get("verify") or {}
+    verify_checks = verify_raw.get("checks")
+    if verify_checks is not None:
+        verify_checks = [str(c) for c in verify_checks]
+
+    hooks_raw = raw.get("hooks") or {}
+    hooks_cfg: dict[str, list[HookRule]] = {}
+    for stage in ("pre_tool", "post_tool"):
+        hooks_cfg[stage] = [HookRule(tools=list(entry.get("tools", [])), command=entry["command"])
+                            for entry in (hooks_raw.get(stage) or [])]
+
+    cfg = Config(models=models, providers=providers,
+                verify_auto=bool(verify_raw.get("auto", True)),
+                verify_checks=verify_checks,
+                review_auto=bool(raw.get("review_auto", True)),
+                hooks=hooks_cfg)
 
     roles: dict[str, Role] = {}
     for name, r in raw["roles"].items():

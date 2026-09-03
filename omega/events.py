@@ -104,6 +104,33 @@ class Phase:
     state: Literal["waiting", "thinking", "streaming", "tools", "idle"]
 
 
+@dataclass(frozen=True)
+class Checkpoint:
+    """A working-tree snapshot taken before a BUILD-mode turn -- see checkpoint.py."""
+    turn: int
+    id: str
+
+
+@dataclass(frozen=True)
+class Verified:
+    """One end-of-turn verification pass (possibly a retry) -- see verify.py."""
+    results_summary: str
+    ok: bool
+
+
+@dataclass(frozen=True)
+class JobStarted:
+    """A `bash(..., background=True)` job began running -- see tools.py."""
+    id: str
+    command: str
+
+
+@dataclass(frozen=True)
+class JobFinished:
+    id: str
+    exit_code: int
+
+
 Event = (TextDelta | ToolStart | ToolEnd | Compacted | MemoryWrite |
          MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed | Phase |
-         Fallback)
+         Fallback | Checkpoint | Verified | JobStarted | JobFinished)
