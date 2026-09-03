@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from . import permissions
+from . import mcp, permissions
 from .events import Option
 from .llm import ToolCall
 
@@ -278,7 +278,8 @@ async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
       "Use this BEFORE call_tool when you need an integration, then pass the "
       "exact name to call_tool.",
       {"query": S, "limit": I}, ["query"])
-def _find_tools(query: str, limit: int = 8) -> str:
+async def _find_tools(query: str, limit: int = 8) -> str:
+    await mcp.ensure_loaded()
     terms = [w for w in query.lower().split() if len(w) > 2]
     scored: list[tuple[int, str, dict[str, Any]]] = []
     for name, entry in deferred().items():
@@ -307,6 +308,7 @@ def _find_tools(query: str, limit: int = 8) -> str:
       "find_tools output; `arguments` is a JSON object of its parameters.",
       {"name": S, "arguments": {"type": "object"}}, ["name"], mutates=True)
 async def _call_tool(name: str, arguments: ToolArgs | None = None) -> str:
+    await mcp.ensure_loaded()
     entry = REGISTRY.get(name)
     if entry is None or not entry.deferred:
         return (f"error: {name!r} is not a deferred tool. "

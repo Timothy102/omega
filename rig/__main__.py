@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from typing import Any
 
 from . import config, mcp, session, subagent, tools
 from .config import Config
@@ -43,6 +44,8 @@ async def main() -> None:
         return
     if argv and argv[0] == "models":
         return console.print(_render_models_table(config.load()))
+    if argv and argv[0] == "connections":
+        return await _connections(argv[1:])
 
     # Parse every flag up front so order never matters.
     flags = {a for a in argv if a.startswith("-")}
@@ -168,6 +171,154 @@ def _render_models_table(cfg: Config) -> str:
         lines.append(f"{alias:<10}{m.model:<26}{m.provider:<16}{m.context:>10,}"
                      f"{m.effort or '-':>8}  {roles}")
     return "\n".join(lines)
+
+
+def _fmt_last_used(ts: float | None) -> str:
+    if ts is None:
+        return "-"
+    import datetime
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _connections_rows() -> list[tuple[str, str, str, str, str, str]]:
+    """(name, state, tools, auth, source, last used), built from
+    integrations.overview() -- rig's own servers plus what's importable from
+    the catalog or Claude Code but isn't configured yet."""
+    from . import integrations
+    rows: list[tuple[str, str, str, str, str, str]] = []
+    for r in integrations.overview():
+        state = r["state"]
+        if r["source"] == "catalog" and not r["verified"]:
+            state = f"{state} (unverified)"
+        rows.append((r["name"], state, str(r["tools"]) if r["state"] == "connected" else "-",
+                    r["auth"] or "-", r["source"], _fmt_last_used(r["last_used"])))
+    return rows
+
+
+async def _connections(argv: list[str]) -> None:
+    from rich.table import Table
+
+    if not argv:
+        table = Table(box=None)
+        for col in ("NAME", "STATE", "TOOLS", "AUTH", "SOURCE", "LAST USED"):
+            table.add_column(col)
+        for row in _connections_rows():
+            table.add_row(*row)
+        return console.print(table)
+
+    sub, rest = argv[0], argv[1:]
+
+    if sub == "catalog":
+        from . import integrations
+        by_category: dict[str, list[Any]] = {}
+        for i in integrations.CATALOG.values():
+            by_category.setdefault(i.category, []).append(i)
+        for category in sorted(by_category):
+            console.print(f"\n[bold]{category}[/bold]")
+            for i in sorted(by_category[category], key=lambda x: x.key):
+                tag = "" if i.verified else " [dim]unverified[/dim]"
+                console.print(f"  [bold]{i.key:<20}[/bold] {i.blurb}{tag}")
+        return
+
+    if sub == "add":
+        return await _connections_add(rest)
+
+    if sub in ("connect", "test"):
+        if not rest:
+            return console.print(f"[red]usage: rig connections {sub} <name>[/red]")
+        name = rest[0]
+        st = await mcp.connect(name)
+        if sub == "test":
+            await mcp.disconnect(name)
+        if st.state == "needs_auth":
+            console.print(f"[yellow]{name}: needs auth[/yellow] -- open {st.error} to "
+                          f"authorise, then run `rig connections connect {name}` again")
+        elif st.state == "connected":
+            console.print(f"[green]{name}: connected[/green] ({st.tools} tools)")
+        else:
+            console.print(f"[red]{name}: {st.state}[/red]" + (f" -- {st.error}" if st.error else ""))
+        return
+
+    if sub in ("enable", "disable"):
+        if not rest:
+            return console.print(f"[red]usage: rig connections {sub} <name>[/red]")
+        name = rest[0]
+        try:
+            await mcp.enable(name, sub == "enable")
+        except KeyError:
+            return console.print(f"[red]no such server {name!r}[/red] (see `rig connections`)")
+        console.print(f"[green]{name}: {'enabled' if sub == 'enable' else 'disabled'}[/green]")
+        return
+
+    if sub == "remove":
+        if not rest:
+            return console.print("[red]usage: rig connections remove <name>[/red]")
+        await mcp.remove(rest[0])
+        console.print(f"[green]{rest[0]}: removed[/green]")
+        return
+
+    console.print(f"[red]unknown `rig connections {sub}`[/red] -- add, connect, enable, "
+                  f"disable, remove, test, catalog")
+
+
+async def _connections_add(rest: list[str]) -> None:
+    import shlex
+
+    from . import integrations
+
+    if not rest:
+        return console.print("[red]usage: rig connections add <catalog-key|name> "
+                             "[--url U | --cmd \"...\"] [--env K=V ...][/red]")
+    name = rest[0]
+    url = cmd = None
+    env: dict[str, str] = {}
+    i = 1
+    while i < len(rest):
+        a = rest[i]
+        if a == "--url" and i + 1 < len(rest):
+            url, i = rest[i + 1], i + 2
+        elif a == "--cmd" and i + 1 < len(rest):
+            cmd, i = rest[i + 1], i + 2
+        elif a == "--env" and i + 1 < len(rest):
+            k, _, v = rest[i + 1].partition("=")
+            env[k] = v
+            i += 2
+        else:
+            i += 1
+
+    catalog = integrations.CATALOG.get(name)
+    spec: dict[str, Any] = {}
+    if catalog is not None:
+        spec["catalog"] = catalog.key
+        if catalog.transport == "remote" and catalog.url:
+            spec["url"] = catalog.url
+        elif catalog.command:
+            import os
+            cmdline = [c.replace("<cwd>", os.getcwd()) for c in catalog.command]
+            spec["command"], spec["args"] = cmdline[0], cmdline[1:]
+
+    if url:
+        spec["url"] = url
+        spec.pop("command", None)
+        spec.pop("args", None)
+    if cmd:
+        parts = shlex.split(cmd)
+        spec["command"], spec["args"] = parts[0], parts[1:]
+        spec.pop("url", None)
+    if env:
+        spec["env"] = env
+
+    if not spec.get("command") and not spec.get("url"):
+        return console.print("[red]give --url, --cmd, or a known catalog key[/red] "
+                             "(see `rig connections catalog`)")
+
+    mcp.add(name, spec)
+    hint = ""
+    if catalog and catalog.auth == "oauth":
+        hint = f" -- run `rig connections connect {name}` to authorise"
+    elif catalog and catalog.env and not env:
+        hint = f" -- needs env: {', '.join(catalog.env)} (rerun with --env K=V)"
+    console.print(f"[green]{name}: added[/green]{hint}")
 
 
 async def _consolidate_on_close(cfg: Config) -> None:

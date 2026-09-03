@@ -40,6 +40,14 @@ pre{background:var(--soft);border:1px solid var(--line);border-radius:7px;paddin
  overflow-x:auto;font:12px ui-monospace,monospace;margin:12px 0 0}
 .pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;
  background:var(--soft);border:1px solid var(--line);margin:2px 4px 2px 0}
+h3.sec{margin:20px 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)}
+.cathead{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);
+ margin:16px 0 4px;font-weight:600}
+.introw{display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line)}
+.introw .meta{flex:1;min-width:0}
+.introw .meta .b{font-size:12px;color:var(--dim);margin-top:1px}
+#catSearch{margin:8px 0}
+button.small{padding:5px 10px;font-size:12px}
 </style>
 <main>
 <h1>rig</h1><p class="sub" id="tagline">Let's get you running.</p>
@@ -86,9 +94,10 @@ const STEPS=[
  enter(){ renderRoles(); }},
 
 {t:"Tools",r:()=>`<h2>Connect tools</h2>
- <p class="dim">MCP servers found in your Claude Code config. Remote ones need OAuth
- and are skipped; stdio servers work.</p><div id="mc" class="dim">scanning…</div>`,
- enter(){ loadMcp(); }},
+ <p class="dim">Connect from the catalog, import what Claude Code already has, or manage
+ what rig is already using. Tools stay out of the prompt until the model searches for them.</p>
+ <div id="mc" class="dim">loading…</div>`,
+ enter(){ loadConnections(); }},
 
 {t:"Test",r:()=>`<h2>Take it for a spin</h2>
  <p class="dim">Runs one real turn against your config — proof it works end to end.</p>
@@ -156,22 +165,104 @@ function renderRoles(){
     </div><p class="dim" style="margin:-4px 0 12px;font-size:12px">${d}${
       fast&&k.includes("fast")?` — fastest measured: <b>${fast}</b>`:""}</p>`).join("");
 }
-async function loadMcp(){
-  const {servers}=await api("/api/mcp/discover");
-  const stdio=servers.filter(s=>s.stdio), remote=servers.filter(s=>!s.stdio);
-  $("#mc").innerHTML=`<table><tr><th>Server</th><th></th><th></th></tr>`+
-    stdio.map(s=>`<tr><td>${s.name}</td><td class="mono dim">${s.detail}</td>
-      <td style="width:150px"><button onclick="testMcp('${s.name}',this)">test</button>
-      <span class="mono"></span></td></tr>`).join("")+`</table>
-    <p class="dim" style="margin-top:14px">${remote.length} remote server${remote.length===1?"":"s"}
-    skipped (OAuth): ${remote.map(s=>`<span class="pill">${s.name}</span>`).join("")}</p>`;
+let connData=null, catFilter="";
+
+async function loadConnections(){
+  connData=await api("/api/connections/list");
+  renderConnections();
 }
-async function testMcp(name,btn){
-  const out=btn.nextElementSibling; out.textContent=" connecting…"; btn.disabled=true;
-  const spec=(await api("/api/config")).mcp?.[name];
-  const r=await api("/api/mcp/test",{name,config:spec||{}});
-  out.textContent=r.ok?` ${r.tools.length} tools`:` ${(r.error||"failed").slice(0,20)}`;
-  out.className="mono "+(r.ok?"ok":"err"); btn.disabled=false;
+function connStateBadge(r){
+  if(r.state==="connected") return `<span class="ok">connected</span> <span class="dim">(${r.tools})</span>`;
+  if(r.state==="needs_auth") return `<span class="err">needs auth</span>`;
+  if(r.state==="error") return `<span class="err">error</span>`;
+  if(r.state==="disabled") return `<span class="dim">disabled</span>`;
+  return `<span class="dim">configured</span>`;
+}
+function renderConnections(){
+  let html="";
+  if(connData.configured.length){
+    html+=`<h3 class="sec">Connected</h3><table><tr><th>Name</th><th>State</th><th></th></tr>`+
+      connData.configured.map(r=>`<tr><td>${r.name}</td><td>${connStateBadge(r)}</td>
+        <td style="width:260px">
+        <button class="small" onclick="connectServer('${r.name}')">connect</button>
+        <button class="small" onclick="testServer('${r.name}')">test</button>
+        <button class="small" onclick="toggleServer('${r.name}',${r.enabled?"false":"true"})">${r.enabled?"disable":"enable"}</button>
+        <button class="small" onclick="removeServer('${r.name}')">remove</button>
+        </td></tr>`).join("")+`</table>`;
+  }
+  if(connData.claudeCode.length){
+    html+=`<h3 class="sec">Found in Claude Code</h3><table><tr><th>Name</th><th></th><th></th></tr>`+
+      connData.claudeCode.map(c=>`<tr><td>${c.name}</td>
+        <td class="mono dim">${c.transport==="stdio"?c.command:c.url}</td>
+        <td style="width:100px"><button class="small" onclick="importClaude('${c.name}')">import</button></td>
+        </tr>`).join("")+`</table>`;
+  }
+  html+=`<h3 class="sec">Catalog</h3>
+    <input id="catSearch" placeholder="Search integrations…" value="${catFilter}"
+     oninput="catFilter=this.value;renderCatalog()">
+    <div id="catList"></div>
+    <div class="msg" id="connMsg"></div>`;
+  $("#mc").innerHTML=html;
+  renderCatalog();
+}
+function renderCatalog(){
+  const q=catFilter.trim().toLowerCase();
+  const groups={};
+  connData.catalog.forEach(i=>{
+    if(q && !(i.name.toLowerCase().includes(q) || i.blurb.toLowerCase().includes(q) || i.key.includes(q))) return;
+    (groups[i.category]=groups[i.category]||[]).push(i);
+  });
+  const cats=Object.keys(groups).sort();
+  $("#catList").innerHTML=cats.length ? cats.map(cat=>`
+    <div class="cathead">${cat}</div>
+    ${groups[cat].map(i=>`<div class="introw">
+       <div class="meta"><b>${i.name}</b>${i.verified?"":' <span class="dim">unverified</span>'}
+       <div class="b">${i.blurb}</div></div>
+       <span class="pill">${i.auth}</span>
+       <button class="small" onclick="addFromCatalog('${i.key}')">connect</button>
+     </div>`).join("")}`).join("")
+    : `<p class="dim">no matches</p>`;
+}
+function connMsg(text,ok){
+  const m=$("#connMsg"); if(!m) return;
+  m.textContent=text; m.className="msg "+(ok?"ok":"err");
+}
+async function addFromCatalog(key){
+  const entry=connData.catalog.find(i=>i.key===key);
+  const env={};
+  for(const k of (entry?.env||[])){
+    const v=window.prompt(`${entry.name} needs ${k}:`);
+    if(v===null) return;  // cancelled
+    if(v) env[k]=v;
+  }
+  const r=await api("/api/connections/add",{name:key,key,env});
+  if(r.error){ connMsg(`${key}: ${r.error}`,false); return; }
+  await connectServer(key);
+}
+async function importClaude(name){
+  const r=await api("/api/connections/add",{name,source:"claude-code"});
+  if(r.error){ connMsg(`${name}: ${r.error}`,false); return; }
+  connData=await api("/api/connections/list"); renderConnections();
+}
+async function connectServer(name){
+  const st=await api("/api/connections/connect",{name});
+  if(st.state==="needs_auth") connMsg(`${name}: open ${st.error} to authorise, then click connect again`,false);
+  else if(st.state==="connected") connMsg(`${name}: connected (${st.tools} tools)`,true);
+  else connMsg(`${name}: ${st.state}${st.error?" — "+st.error:""}`,false);
+  connData=await api("/api/connections/list"); renderConnections();
+}
+async function testServer(name){
+  const st=await api("/api/connections/test",{name});
+  connMsg(`${name}: ${st.state==="connected"?`ok (${st.tools} tools)`:(st.error||st.state)}`,st.state==="connected");
+  connData=await api("/api/connections/list"); renderConnections();
+}
+async function toggleServer(name,val){
+  await api("/api/connections/toggle",{name,enabled:val});
+  connData=await api("/api/connections/list"); renderConnections();
+}
+async function removeServer(name){
+  await api("/api/connections/remove",{name});
+  connData=await api("/api/connections/list"); renderConnections();
 }
 async function drive(){
   const b=$("#db"); b.disabled=true; b.textContent="running…";

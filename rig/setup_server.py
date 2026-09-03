@@ -1,7 +1,9 @@
 import asyncio
 import json
+import os
 import re
 import secrets
+import shlex
 import threading
 import webbrowser
 from collections.abc import Callable
@@ -13,7 +15,7 @@ from urllib.parse import ParseResult, parse_qs, urlparse
 
 import httpx
 
-from . import config, events, mcp
+from . import config, events, integrations, mcp
 
 Body = dict[str, Any]
 
@@ -160,6 +162,104 @@ def api_mcp_test(body: Body) -> Body:
     return asyncio.run(go())
 
 
+def _status_json(st: "mcp.ServerStatus") -> Body:
+    return {"name": st.name, "enabled": st.enabled, "state": st.state,
+            "tools": st.tools, "error": st.error, "lastUsed": st.last_used}
+
+
+def api_connections_list(_b: Body) -> Body:
+    configured = mcp.status()
+    raw = config.mcp_config()
+    known = set(configured)
+    claude = {n: c for n, c in integrations.imported_from_claude_code().items() if n not in known}
+
+    def row(name: str, st: "mcp.ServerStatus") -> Body:
+        key = raw.get(name, {}).get("catalog")
+        cat = integrations.CATALOG.get(key) if key else None
+        out = _status_json(st)
+        out["auth"] = cat.auth if cat else None
+        out["category"] = cat.category if cat else None
+        return out
+
+    configured_rows = [row(n, st) for n, st in sorted(configured.items())]
+    catalog_rows = [{"key": i.key, "name": i.name, "category": i.category, "blurb": i.blurb,
+                     "auth": i.auth, "transport": i.transport, "verified": i.verified,
+                     "env": list(i.env), "docs": i.docs}
+                    for i in sorted(integrations.CATALOG.values(), key=lambda x: x.key)
+                    if i.key not in known]
+    claude_rows = [{"name": n, **c} for n, c in sorted(claude.items())]
+    return {"configured": configured_rows, "catalog": catalog_rows, "claudeCode": claude_rows}
+
+
+def api_connections_add(body: Body) -> Body:
+    name = body.get("name")
+    if not name:
+        return {"error": "name required"}
+
+    if body.get("source") == "claude-code":
+        # Never round-trip a real secret through the browser: read the
+        # unredacted spec server-side and write it straight into rig's config.
+        raw = mcp.discover(include_rig=False)
+        found = raw.get(name)
+        if found is None:
+            return {"error": f"{name!r} not found in Claude Code's config"}
+        mcp.add(name, dict(found))
+        return {"ok": True}
+
+    key = body.get("key")
+    catalog = integrations.CATALOG.get(key) if key else integrations.CATALOG.get(name)
+    spec: Body = {}
+    if catalog is not None:
+        spec["catalog"] = catalog.key
+        if catalog.transport == "remote" and catalog.url:
+            spec["url"] = catalog.url
+        elif catalog.command:
+            cmdline = [c.replace("<cwd>", os.getcwd()) for c in catalog.command]
+            spec["command"], spec["args"] = cmdline[0], cmdline[1:]
+
+    if body.get("url"):
+        spec["url"] = body["url"]
+        spec.pop("command", None)
+        spec.pop("args", None)
+    if body.get("command"):
+        parts = shlex.split(body["command"])
+        spec["command"], spec["args"] = parts[0], parts[1:]
+        spec.pop("url", None)
+    if body.get("env"):
+        spec["env"] = body["env"]
+
+    if not spec.get("command") and not spec.get("url"):
+        return {"error": "give a url, command, or known catalog key"}
+    mcp.add(name, spec)
+    return {"ok": True}
+
+
+def api_connections_connect(body: Body) -> Body:
+    st = asyncio.run(mcp.connect(body["name"], timeout=body.get("timeout")))
+    return _status_json(st)
+
+
+def api_connections_toggle(body: Body) -> Body:
+    try:
+        asyncio.run(mcp.enable(body["name"], bool(body.get("enabled"))))
+    except KeyError as e:
+        return {"error": str(e)}
+    return {"ok": True}
+
+
+def api_connections_test(body: Body) -> Body:
+    async def go() -> "mcp.ServerStatus":
+        st = await mcp.connect(body["name"], timeout=body.get("timeout", 30))
+        await mcp.disconnect(body["name"])
+        return st
+    return _status_json(asyncio.run(go()))
+
+
+def api_connections_remove(body: Body) -> Body:
+    asyncio.run(mcp.remove(body["name"]))
+    return {"ok": True}
+
+
 BENCH_CANDIDATES = ["glm-5.3-flash", "kimi-k3", "gemini-2.5-flash-lite",
                     "gemini-3.5-flash-lite", "claude-haiku-4-5", "gpt-4.1-mini",
                     "deepseek-v4-flash", "kimi-k3-fast"]
@@ -266,6 +366,12 @@ ROUTES: dict[str, Callable[[Body], Body]] = {
     "/api/test-model": api_test_model,
     "/api/mcp/discover": api_mcp_discover,
     "/api/mcp/test": api_mcp_test,
+    "/api/connections/list": api_connections_list,
+    "/api/connections/add": api_connections_add,
+    "/api/connections/connect": api_connections_connect,
+    "/api/connections/toggle": api_connections_toggle,
+    "/api/connections/test": api_connections_test,
+    "/api/connections/remove": api_connections_remove,
     "/api/benchmark": api_benchmark,
     "/api/agent": api_agent,
 }

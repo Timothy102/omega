@@ -27,6 +27,7 @@ DEFAULTS: dict[str, Any] = {
         "opus":   {"model": "claude-opus-5", "provider": "anthropic", "context": 1048576, "effort": "high"},
         "sonnet": {"model": "claude-sonnet-5", "provider": "anthropic", "context": 1048576, "effort": "high"},
         "haiku":  {"model": "claude-haiku-4-5", "provider": "anthropic", "context": 200000},
+        "spark":  {"model": "meta/muse-spark-1.3", "provider": "openrouter", "context": 1048576},
         "kimi":   {"model": "moonshotai/kimi-k3", "provider": "openrouter", "context": 1048576},
         "glm":    {"model": "z-ai/glm-5.3-flash", "provider": "openrouter", "context": 128000},
     },
@@ -181,3 +182,13 @@ def mcp_names() -> list[str]:
         return []
     import json as _json
     return list(_json.loads(_strip_jsonc(CONFIG_PATH.read_text())).get("mcp", {}))
+
+
+def mcp_config() -> dict[str, dict[str, Any]]:
+    """The rig-owned "mcp" block as written on disk -- unlike mcp.discover(),
+    this never mixes in Claude Code's servers, so the connections manager can
+    tell "configured in rig" apart from "merely importable"."""
+    if not CONFIG_PATH.exists():
+        return {}
+    raw: dict[str, Any] = json.loads(_strip_jsonc(CONFIG_PATH.read_text())).get("mcp", {})
+    return raw

@@ -145,7 +145,9 @@ rig sessions                     # list sessions
 rig models                       # show the model catalog and role defaults
 rig memory gc                    # consolidate memory now
 rig onboard                      # short terminal setup (no browser)
-rig --mcp "list my Linear issues"
+rig connections                  # manage MCP servers (see ## MCP)
+rig "list my Linear issues"      # connects enabled MCP servers lazily
+rig --mcp "..."                  # or connect everything eagerly at startup
 rig --yolo "..."                 # skip permission prompts
 ```
 
@@ -192,22 +194,44 @@ reach your shell.
 
 ## MCP
 
-rig imports MCP servers from your Claude Code config and from installed
-plugins, and proxies remote ones through `mcp-remote` so OAuth works.
+`rig connections` manages MCP servers: a catalog of ~45 well-known ones
+(Linear, Notion, GitHub, Postgres, Stripe, ...), whatever's already found in
+your Claude Code config, and whatever you've configured yourself. Remote
+servers proxy through `mcp-remote`, which owns the OAuth dance.
 
 ```bash
-rig --mcp "what's in my Linear backlog?"
+rig connections                    # table: name, state, tools, auth, source, last used
+rig connections catalog            # browse the catalog by category
+rig connections add linear         # configure a catalog entry
+rig connections add mytool --cmd "npx -y my-mcp-server" --env API_KEY=...
+rig connections connect linear     # connect now (triggers OAuth if needed)
+rig connections test linear        # connect, report tool count, disconnect
+rig connections enable|disable linear
+rig connections remove linear
 ```
+
+Connecting an OAuth server opens an authorize-me URL; `rig connections
+connect` prints it and waits, so re-run it once you've clicked through.
 
 Connected tools are *deferred*: they don't appear in the prompt at all. The
 model calls `find_tools("linear issues")` to discover them and `call_tool` to
-run one. Add your own in `~/.rig/config.json`:
+run one. Enabled servers connect **lazily** — the first `find_tools`/`call_tool`
+of a session connects everything not yet connected, in parallel, with
+failures recorded instead of raised. `rig --mcp` is still there for connecting
+everything eagerly at startup instead.
+
+Add your own server directly in `~/.rig/config.json` if you'd rather skip the
+CLI:
 
 ```json
 "mcp": {
-  "linear": { "command": "npx", "args": ["-y", "mcp-remote@0.8.1", "https://mcp.linear.app/mcp"] }
+  "linear": { "command": "npx", "args": ["-y", "mcp-remote@0.8.1", "https://mcp.linear.app/mcp"],
+             "enabled": true, "catalog": "linear" }
 }
 ```
+
+`enabled` defaults to `true`; `catalog` is optional and just links the entry
+back to its catalog metadata (auth type, category) for `rig connections`.
 
 ## Memory
 
