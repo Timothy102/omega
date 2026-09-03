@@ -15,3 +15,6 @@ app/**/.build/
 app/**/DerivedData/
 app/**/xcuserdata/
 *.xcuserstate
+
+# Personal Claude Code overrides, not team policy
+.claude/settings.local.json
