@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from rig import artifacts, config, events, llm, loop, tools
-from rig.llm import ToolCall, Turn
+from omega import artifacts, config, events, llm, loop, tools
+from omega.llm import ToolCall, Turn
 
 
 class FakeProvider:

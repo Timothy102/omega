@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from rig import config, loop, onboarding
+from omega import config, loop, onboarding
 
 
 @pytest.fixture(autouse=True)

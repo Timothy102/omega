@@ -1,6 +1,6 @@
 import json
 
-from rig import compact, session
+from omega import compact, session
 
 
 def agentic_history(rounds=8):

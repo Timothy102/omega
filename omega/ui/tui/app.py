@@ -1,4 +1,4 @@
-"""RigApp: composition, key bindings, and turn execution. Rendering logic
+"""OmegaApp: composition, key bindings, and turn execution. Rendering logic
 lives in transcript.py/sidebar.py/status.py; this module only translates
 events into calls on their typed widget methods, never the reverse."""
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _relative_age(seconds: float) -> str:
     return f"{int(hours / 24)}d"
 
 
-class RigApp(App[None]):
+class OmegaApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #body { height: 1fr; }
@@ -96,7 +96,7 @@ class RigApp(App[None]):
         yield Input(id="prompt", placeholder=f"{self.mode}› ")
 
     def on_mount(self) -> None:
-        # Deferred import: reads the CURRENT `rig.ui.tui.HISTORY`, so tests
+        # Deferred import: reads the CURRENT `omega.ui.tui.HISTORY`, so tests
         # that monkeypatch it before construction are respected.
         from . import HISTORY
         self._input_history = InputHistory(HISTORY)

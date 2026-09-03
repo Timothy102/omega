@@ -1,5 +1,5 @@
 """The right-hand panel: tabbed Session / Git / Connections. Closed by
-default (`RigApp` starts it hidden); toggled with ctrl+b or `/sidebar`."""
+default (`OmegaApp` starts it hidden); toggled with ctrl+b or `/sidebar`."""
 from __future__ import annotations
 
 import time

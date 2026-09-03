@@ -2,7 +2,7 @@
 import pytest
 from conftest import Chunk, tc
 
-from rig import llm
+from omega import llm
 
 
 async def drain(chunks, role=None):

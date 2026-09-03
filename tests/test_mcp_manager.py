@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from mcp.types import TextContent
 
-from rig import config, mcp, tools
+from omega import config, mcp, tools
 
 AUTH_URL = "https://example.com/oauth/authorize?token=abc123"
 

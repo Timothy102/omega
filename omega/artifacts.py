@@ -6,7 +6,7 @@ from typing import Any
 
 from .tools import truncate
 
-DIR = Path.home() / ".rig" / "sessions"
+DIR = Path.home() / ".omega" / "sessions"
 
 Meta = dict[str, Any]
 

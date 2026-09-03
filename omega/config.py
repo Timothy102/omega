@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-CONFIG_PATH = Path(os.environ.get("RIG_CONFIG", Path.home() / ".rig" / "config.json"))
+CONFIG_PATH = Path(os.environ.get("OMEGA_CONFIG", Path.home() / ".omega" / "config.json"))
 
 DEFAULTS: dict[str, Any] = {
     "providers": {
@@ -69,8 +69,8 @@ class Provider:
             hint = (f"export {self.api_key_env}=..." if self.api_key_env
                     else f'set "apiKey" in {CONFIG_PATH}')
             raise SystemExit(
-                f"rig: no API key for provider {self.name!r}.\n"
-                f"  Run `rig setup` to configure one, or {hint}")
+                f"omega: no API key for provider {self.name!r}.\n"
+                f"  Run `omega setup` to configure one, or {hint}")
         return key
 
 
@@ -119,7 +119,7 @@ class Config:
         for alias, m in self.models.items():
             if m.model == text:
                 return alias
-        raise SystemExit(f"rig: unknown model {text!r}; have {sorted(self.models)}")
+        raise SystemExit(f"omega: unknown model {text!r}; have {sorted(self.models)}")
 
 
 def _strip_jsonc(text: str) -> str:
@@ -149,7 +149,7 @@ def load() -> Config:
         # the SDK's own default already omits a "/v1" suffix.
         base_url = (p.get("baseUrl") or "").rstrip("/")
         if ptype == "openai" and not base_url:
-            raise SystemExit(f"rig: provider {name!r} is missing \"baseUrl\" in {CONFIG_PATH}")
+            raise SystemExit(f"omega: provider {name!r} is missing \"baseUrl\" in {CONFIG_PATH}")
         providers[name] = Provider(
             name=name, type=ptype, base_url=base_url,
             api_key_env=p.get("apiKeyEnv", ""),
@@ -185,9 +185,9 @@ def mcp_names() -> list[str]:
 
 
 def mcp_config() -> dict[str, dict[str, Any]]:
-    """The rig-owned "mcp" block as written on disk -- unlike mcp.discover(),
+    """The omega-owned "mcp" block as written on disk -- unlike mcp.discover(),
     this never mixes in Claude Code's servers, so the connections manager can
-    tell "configured in rig" apart from "merely importable"."""
+    tell "configured in omega" apart from "merely importable"."""
     if not CONFIG_PATH.exists():
         return {}
     raw: dict[str, Any] = json.loads(_strip_jsonc(CONFIG_PATH.read_text())).get("mcp", {})

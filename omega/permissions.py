@@ -5,13 +5,15 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-STORE = Path.home() / ".rig" / "permissions.json"
+STORE = Path.home() / ".omega" / "permissions.json"
 
 ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 # Never askable: no confirmation prompt makes these safe, and a model that has
 # ingested untrusted content is exactly what would propose them.
-FORBIDDEN_PATHS = ("/.ssh", "/.aws", "/.gnupg", "/.rig/config.json",
+# Both `.omega/config.json` and the pre-rename `.rig/config.json` stay
+# protected -- the old file may still exist (with a key in it) after migration.
+FORBIDDEN_PATHS = ("/.ssh", "/.aws", "/.gnupg", "/.omega/config.json", "/.rig/config.json",
                    "/.claude.json", "/.claude/", "/.mcp-auth", "/.netrc",
                    "/.config/gh", "/.kube")
 FORBIDDEN_PATTERNS = [
@@ -111,7 +113,7 @@ def decide(name: str, args: dict[str, Any], cwd: str | None = None,
         return ALLOW, "read-only"
 
     if name in ("save_artifact", "update_artifact", "remember", "supersede", "link"):
-        return ALLOW, "writes to rig's own store (~/.rig or .rig/), not project files"
+        return ALLOW, "writes to omega's own store (~/.omega or .omega/), not project files"
 
     if name in ("write", "edit"):
         target = Path(os.path.expanduser(args.get("path", ""))).resolve()

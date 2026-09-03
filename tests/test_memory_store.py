@@ -1,6 +1,6 @@
 import pytest
 
-from rig.memory import store
+from omega.memory import store
 
 
 @pytest.fixture(autouse=True)
@@ -118,14 +118,14 @@ def test_gitignore_bootstrap_happens_for_a_git_cwd(git_cwd):
     store.write_node("project", "fact", "t", "b")
     gitignore = git_cwd / ".gitignore"
     assert gitignore.exists()
-    assert ".rig/" in gitignore.read_text().splitlines()
-    assert (git_cwd / ".rig").is_dir()
+    assert ".omega/" in gitignore.read_text().splitlines()
+    assert (git_cwd / ".omega").is_dir()
 
 
 def test_gitignore_bootstrap_does_not_happen_for_a_non_git_cwd(tmp_path):
     store.write_node("project", "fact", "t", "b", cwd=str(tmp_path))
     assert not (tmp_path / ".gitignore").exists()
-    assert (tmp_path / ".rig").is_dir()
+    assert (tmp_path / ".omega").is_dir()
 
 
 def test_gitignore_bootstrap_appends_without_duplicating(git_cwd):
@@ -134,7 +134,7 @@ def test_gitignore_bootstrap_appends_without_duplicating(git_cwd):
     store.write_node("project", "fact", "t", "b")
     store.write_node("project", "fact", "t2", "b2")
     lines = gitignore.read_text().splitlines()
-    assert lines.count(".rig/") == 1
+    assert lines.count(".omega/") == 1
     assert "node_modules/" in lines
 
 

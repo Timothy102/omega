@@ -3,8 +3,8 @@ import io
 import pytest
 from rich.console import Console
 
-from rig import events
-from rig.ui import plain
+from omega import events
+from omega.ui import plain
 
 
 @pytest.fixture(autouse=True)

@@ -1,5 +1,5 @@
-from rig import events
-from rig.ui import format
+from omega import events
+from omega.ui import format
 
 
 def test_tool_start_without_subagent_has_no_leading_indent_marker():

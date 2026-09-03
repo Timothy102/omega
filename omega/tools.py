@@ -246,7 +246,7 @@ async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
         if verdict == permissions.ASK:
             if CONFIRM is None:
                 return (f"error: {call.name} requires confirmation ({why}) but "
-                        f"rig is running non-interactively. Re-run without --yolo "
+                        f"omega is running non-interactively. Re-run without --yolo "
                         f"in a terminal, or narrow the command.")
             # Serialized: parallel dispatch would interleave prompts.
             async with _confirm_lock:
@@ -332,7 +332,7 @@ async def _call_tool(name: str, arguments: ToolArgs | None = None) -> str:
 async def _ask_user(question: str, header: str = "", options: list[Option] | None = None,
                     multi_select: bool = False) -> str:
     if ASK_USER is None:
-        return ("error: ask_user requires an interactive session; rig is "
+        return ("error: ask_user requires an interactive session; omega is "
                 "running non-interactively. State your assumption and "
                 "proceed instead.")
     async with _confirm_lock:

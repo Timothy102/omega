@@ -2,7 +2,7 @@ import asyncio
 import sys
 from typing import Any
 
-from . import config, mcp, session, subagent, tools
+from . import config, mcp, migrate, session, subagent, tools
 from .config import Config
 from .memory import consolidate
 from .ui import plain
@@ -13,7 +13,7 @@ console = plain.console
 async def main() -> None:
     argv = sys.argv[1:]
     # Dispatch subcommands BEFORE config.load(): it exits when no API key is
-    # set, which made `rig setup` -- the flow that sets the key -- unreachable.
+    # set, which made `omega setup` -- the flow that sets the key -- unreachable.
     if argv and argv[0] == "setup":
         from .setup_server import serve
         return serve()
@@ -25,7 +25,7 @@ async def main() -> None:
         return
     if argv and argv[0] == "sessions":
         # `sessions` lists and exits; silently swallowing further flags made
-        # `rig sessions --resume X` look like it had done something.
+        # `omega sessions --resume X` look like it had done something.
         extra = [a for a in argv[1:] if a != "--"]
         if extra:
             console.print(f"[yellow]note:[/yellow] `sessions` only lists — "
@@ -33,7 +33,7 @@ async def main() -> None:
             if "--resume" in extra:
                 i = extra.index("--resume")
                 sid = extra[i + 1] if i + 1 < len(extra) else "<id>"
-                console.print(f"      to open it:  [bold]rig --resume {sid}[/bold]")
+                console.print(f"      to open it:  [bold]omega --resume {sid}[/bold]")
         return console.print(session.render_list())
     if argv and argv[0] == "memory":
         # gc needs config.load(), unlike setup/sessions above -- keep it local
@@ -43,7 +43,7 @@ async def main() -> None:
             console.print(await consolidate.run(cfg, "project", force=True))
             console.print(await consolidate.run(cfg, "global", force=True))
         else:
-            console.print("usage: rig memory gc")
+            console.print("usage: omega memory gc")
         return
     if argv and argv[0] == "models":
         return console.print(_render_models_table(config.load()))
@@ -60,7 +60,7 @@ async def main() -> None:
         i = argv.index("--resume")
         if i + 1 >= len(argv):
             return console.print("[red]--resume needs a session id[/red] "
-                                 "(see `rig sessions`)")
+                                 "(see `omega sessions`)")
         resume_id = argv[i + 1]
         argv = argv[:i] + argv[i + 2:]
     model_arg = None
@@ -68,7 +68,7 @@ async def main() -> None:
         i = argv.index("--model")
         if i + 1 >= len(argv):
             return console.print("[red]--model needs an alias or model id[/red] "
-                                 "(see `rig models`)")
+                                 "(see `omega models`)")
         model_arg = argv[i + 1]
         argv = argv[:i] + argv[i + 2:]
     argv = [a for a in argv
@@ -137,8 +137,8 @@ async def main() -> None:
     # A one-shot prompt always uses ui/plain.py, even from a real terminal;
     # the TUI only replaces the bare interactive REPL.
     if not prompt and sys.stdin.isatty() and sys.stdout.isatty():
-        from .ui.tui import RigApp
-        app = RigApp(cfg, sess, mode, history, model_alias=sess.model_override)
+        from .ui.tui import OmegaApp
+        app = OmegaApp(cfg, sess, mode, history, model_alias=sess.model_override)
         if not yolo:
             tools.CONFIRM = app.confirm
             tools.ASK_USER = app.ask_user
@@ -150,7 +150,7 @@ async def main() -> None:
         console.print(f"[dim]{resumed_note}[/dim]")
 
     # No prompt on argv and stdin isn't a terminal: read it from there, so
-    # `echo "fix the tests" | rig` works instead of only piping into a REPL
+    # `echo "fix the tests" | omega` works instead of only piping into a REPL
     # that no longer exists for this invocation.
     if not prompt and not sys.stdin.isatty():
         prompt = sys.stdin.read().strip()
@@ -160,7 +160,7 @@ async def main() -> None:
         await _consolidate_on_close(cfg)
         return
 
-    console.print("[dim]rig: no prompt given and not an interactive terminal[/dim]")
+    console.print("[dim]omega: no prompt given and not an interactive terminal[/dim]")
 
 
 def _render_models_table(cfg: Config) -> str:
@@ -187,7 +187,7 @@ def _fmt_last_used(ts: float | None) -> str:
 
 def _connections_rows() -> list[tuple[str, str, str, str, str, str]]:
     """(name, state, tools, auth, source, last used), built from
-    integrations.overview() -- rig's own servers plus what's importable from
+    integrations.overview() -- omega's own servers plus what's importable from
     the catalog or Claude Code but isn't configured yet."""
     from . import integrations
     rows: list[tuple[str, str, str, str, str, str]] = []
@@ -230,14 +230,14 @@ async def _connections(argv: list[str]) -> None:
 
     if sub in ("connect", "test"):
         if not rest:
-            return console.print(f"[red]usage: rig connections {sub} <name>[/red]")
+            return console.print(f"[red]usage: omega connections {sub} <name>[/red]")
         name = rest[0]
         st = await mcp.connect(name)
         if sub == "test":
             await mcp.disconnect(name)
         if st.state == "needs_auth":
             console.print(f"[yellow]{name}: needs auth[/yellow] -- open {st.error} to "
-                          f"authorise, then run `rig connections connect {name}` again")
+                          f"authorise, then run `omega connections connect {name}` again")
         elif st.state == "connected":
             console.print(f"[green]{name}: connected[/green] ({st.tools} tools)")
         else:
@@ -246,23 +246,23 @@ async def _connections(argv: list[str]) -> None:
 
     if sub in ("enable", "disable"):
         if not rest:
-            return console.print(f"[red]usage: rig connections {sub} <name>[/red]")
+            return console.print(f"[red]usage: omega connections {sub} <name>[/red]")
         name = rest[0]
         try:
             await mcp.enable(name, sub == "enable")
         except KeyError:
-            return console.print(f"[red]no such server {name!r}[/red] (see `rig connections`)")
+            return console.print(f"[red]no such server {name!r}[/red] (see `omega connections`)")
         console.print(f"[green]{name}: {'enabled' if sub == 'enable' else 'disabled'}[/green]")
         return
 
     if sub == "remove":
         if not rest:
-            return console.print("[red]usage: rig connections remove <name>[/red]")
+            return console.print("[red]usage: omega connections remove <name>[/red]")
         await mcp.remove(rest[0])
         console.print(f"[green]{rest[0]}: removed[/green]")
         return
 
-    console.print(f"[red]unknown `rig connections {sub}`[/red] -- add, connect, enable, "
+    console.print(f"[red]unknown `omega connections {sub}`[/red] -- add, connect, enable, "
                   f"disable, remove, test, catalog")
 
 
@@ -272,7 +272,7 @@ async def _connections_add(rest: list[str]) -> None:
     from . import integrations
 
     if not rest:
-        return console.print("[red]usage: rig connections add <catalog-key|name> "
+        return console.print("[red]usage: omega connections add <catalog-key|name> "
                              "[--url U | --cmd \"...\"] [--env K=V ...][/red]")
     name = rest[0]
     url = cmd = None
@@ -315,12 +315,12 @@ async def _connections_add(rest: list[str]) -> None:
 
     if not spec.get("command") and not spec.get("url"):
         return console.print("[red]give --url, --cmd, or a known catalog key[/red] "
-                             "(see `rig connections catalog`)")
+                             "(see `omega connections catalog`)")
 
     mcp.add(name, spec)
     hint = ""
     if catalog and catalog.auth == "oauth":
-        hint = f" -- run `rig connections connect {name}` to authorise"
+        hint = f" -- run `omega connections connect {name}` to authorise"
     elif catalog and catalog.env and not env:
         hint = f" -- needs env: {', '.join(catalog.env)} (rerun with --env K=V)"
     console.print(f"[green]{name}: added[/green]{hint}")
@@ -346,6 +346,7 @@ async def _main_guarded() -> None:
 
 
 def cli() -> None:
+    migrate.run()
     try:
         asyncio.run(_main_guarded())
     except KeyboardInterrupt:

@@ -1,7 +1,7 @@
 
 import pytest
 
-from rig.memory import curate, store
+from omega.memory import curate, store
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,7 @@ def test_preamble_respects_token_budget(git_cwd):
     for i in range(50):
         _write("project", title=f"note {i}", body="x" * 180, importance=0.9)
     text = curate.preamble(budget_tokens=50)
-    from rig import compact
+    from omega import compact
     assert compact.estimate_tokens([{"role": "user", "content": text}]) <= 50
 
 

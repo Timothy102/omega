@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from rig import artifacts, permissions, tools
-from rig.llm import ToolCall
+from omega import artifacts, permissions, tools
+from omega.llm import ToolCall
 
 
 def call(name, **args):

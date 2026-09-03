@@ -6,5 +6,6 @@ dist/
 build/
 .pytest_cache/
 .rig/
+.omega/
 .DS_Store
 .env

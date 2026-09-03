@@ -3,8 +3,8 @@ from typing import Any
 
 import pytest
 
-from rig import llm
-from rig.config import Provider, Role
+from omega import llm
+from omega.config import Provider, Role
 
 
 def make_role(model: str = "claude-opus-5", effort: str | None = "high") -> Role:

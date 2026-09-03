@@ -1,6 +1,6 @@
 import pytest
 
-from rig import events, loop, subagent
+from omega import events, loop, subagent
 
 
 @pytest.fixture(autouse=True)

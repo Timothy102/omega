@@ -197,7 +197,7 @@ def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _anthropic_history(history: list[Message], role: Role) -> list[dict[str, Any]]:
-    """Convert rig's OpenAI-shaped history (after the leading system message)
+    """Convert omega's OpenAI-shaped history (after the leading system message)
     into Messages API turns. Consecutive `tool` messages collapse into one
     user message holding all their `tool_result` blocks -- the API rejects a
     `tool_result` that isn't inside a user message immediately following the

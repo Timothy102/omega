@@ -1,5 +1,5 @@
 <!doctype html>
-<meta charset="utf-8"><title>rig setup</title>
+<meta charset="utf-8"><title>omega setup</title>
 <style>
 :root{--bg:#fbfbfa;--fg:#1a1a19;--dim:#6b6b68;--line:#e4e4e1;--card:#fff;--soft:#f4f4f2;
  --ok:#1a7f4b;--err:#b3261e;--accent:#2b6cb0}
@@ -50,7 +50,7 @@ h3.sec{margin:20px 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:
 button.small{padding:5px 10px;font-size:12px}
 </style>
 <main>
-<h1>rig</h1><p class="sub" id="tagline">Let's get you running.</p>
+<h1>omega</h1><p class="sub" id="tagline">Let's get you running.</p>
 <div class="steps" id="steps"></div>
 <div class="card" id="card"></div>
 <div class="nav"><button id="back" onclick="go(-1)">Back</button>
@@ -60,7 +60,7 @@ button.small{padding:5px 10px;font-size:12px}
 const T = new URLSearchParams(location.search).get("t");
 // /api/* is POST-only: GET dispatch was a CSRF-reachable RCE.
 const api=(p,b)=>fetch(p+"?t="+T,{method:"POST",headers:{"Content-Type":"application/json",
-  "X-Rig-Token":T},body:JSON.stringify(b||{})}).then(r=>r.json());
+  "X-Omega-Token":T},body:JSON.stringify(b||{})}).then(r=>r.json());
 const $=s=>document.querySelector(s);
 let cfg=null, models=[], bench=[], step=0, keyOk=false, ranTest=false;
 
@@ -72,7 +72,7 @@ const ROLES={main:["Main","drives your session — pick the smartest"],
 
 const STEPS=[
 {t:"Provider",r:()=>`<h2>Connect a provider</h2>
- <p class="dim">rig talks to Anthropic natively, or any OpenAI-compatible endpoint.</p>
+ <p class="dim">omega talks to Anthropic natively, or any OpenAI-compatible endpoint.</p>
  <label>Provider type</label>
  <select id="providerType" onchange="onProviderTypeChange()">
    <option value="openai"${Object.values(cfg.providers)[0].type!=='anthropic'?' selected':''}>OpenAI-compatible</option>
@@ -95,7 +95,7 @@ const STEPS=[
 
 {t:"Tools",r:()=>`<h2>Connect tools</h2>
  <p class="dim">Connect from the catalog, import what Claude Code already has, or manage
- what rig is already using. Tools stay out of the prompt until the model searches for them.</p>
+ what omega is already using. Tools stay out of the prompt until the model searches for them.</p>
  <div id="mc" class="dim">loading…</div>`,
  enter(){ loadConnections(); }},
 
@@ -105,13 +105,13 @@ const STEPS=[
  <div id="dr"></div>`},
 
 {t:"Done",r:()=>`<h2>You're set</h2>
- <p class="dim">Config written to <span class="mono">~/.rig/config.json</span>.</p>
- <pre>rig                      # interactive
-rig "fix the failing test"
-rig --plan "add caching"  # read-only planning
-rig --mcp "list my Linear issues"</pre>
+ <p class="dim">Config written to <span class="mono">~/.omega/config.json</span>.</p>
+ <pre>omega                      # interactive
+omega "fix the failing test"
+omega --plan "add caching"  # read-only planning
+omega --mcp "list my Linear issues"</pre>
  <p class="dim" style="margin-top:16px">Re-run this anytime with
- <span class="mono">rig setup</span>.</p>`}];
+ <span class="mono">omega setup</span>.</p>`}];
 
 function render(){
   $("#steps").innerHTML = STEPS.map((_,i)=>

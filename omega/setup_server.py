@@ -198,8 +198,8 @@ def api_connections_add(body: Body) -> Body:
 
     if body.get("source") == "claude-code":
         # Never round-trip a real secret through the browser: read the
-        # unredacted spec server-side and write it straight into rig's config.
-        raw = mcp.discover(include_rig=False)
+        # unredacted spec server-side and write it straight into omega's config.
+        raw = mcp.discover(include_omega=False)
         found = raw.get(name)
         if found is None:
             return {"error": f"{name!r} not found in Claude Code's config"}
@@ -319,7 +319,7 @@ PROBE_PROMPT = ("Run 'pwd' and 'date' with bash, then say in one short "
 
 
 def api_agent(body: Body) -> Body:
-    """Run one real rig turn so onboarding ends on proof it works."""
+    """Run one real omega turn so onboarding ends on proof it works."""
     from . import loop
     calls: list[str] = []
     def emit(ev: events.Event) -> None:
@@ -382,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _authed(self, url: ParseResult) -> bool:
-        supplied = (self.headers.get("X-Rig-Token")
+        supplied = (self.headers.get("X-Omega-Token")
                     or parse_qs(url.query).get("t", [""])[0])
         return secrets.compare_digest(supplied, TOKEN)
 
@@ -443,7 +443,7 @@ def serve(port: int = 0, open_browser: bool = True) -> None:
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/?t={TOKEN}"
-    print(f"rig setup → {url}\nctrl-c to stop")
+    print(f"omega setup → {url}\nctrl-c to stop")
     if open_browser:
         threading.Timer(0.4, partial(webbrowser.open, url)).start()
     try:

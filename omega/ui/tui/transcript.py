@@ -290,7 +290,7 @@ class Transcript(VerticalScroll):
 
     def add_error(self, ev: events.Error) -> None:
         first_line = ev.message.splitlines()[0] if ev.message else ""
-        detail = f" [dim](details in ~/.rig/sessions/{self._session_id}.json)[/dim]" if self._session_id else ""
+        detail = f" [dim](details in ~/.omega/sessions/{self._session_id}.json)[/dim]" if self._session_id else ""
         self._append(f"[red]error:[/red] {first_line}{detail}")
 
     def add_mode_switch(self, mode: str) -> None:

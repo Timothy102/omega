@@ -1,6 +1,6 @@
 """The Textual onboarding wizard: one Screen per step, pushed forward as the
 user completes each one. All provider/catalog/config logic lives in
-`rig/onboarding.py`; this module only renders it and reads the answers back
+`omega/onboarding.py`; this module only renders it and reads the answers back
 into `OnboardingApp`'s state."""
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ class WelcomeScreen(WizardScreen):
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="panel"):
             yield StepIndicator(1)
-            yield Static("[bold]rig[/bold]")
+            yield Static("[bold]omega[/bold]")
             yield Static("A fast, small coding agent for your terminal. Bring your own models.")
             yield Static("Three quick steps: provider → key → model. "
                          "Then we run one real turn to prove it works.")
@@ -209,7 +209,7 @@ class ModelScreen(WizardScreen):
                 yield OptionList(*self._options(choice), id="models")
                 yield Static(f"[dim]Background roles (subagents, compaction, memory) will use "
                             f"{choice.cheap_alias} automatically — change any of this later "
-                            f"with /model or `rig setup`.[/dim]")
+                            f"with /model or `omega setup`.[/dim]")
             else:
                 yield Input(placeholder="model id served by this endpoint", id="model-id")
 
@@ -336,10 +336,10 @@ class DoneScreen(WizardScreen):
     BINDINGS = [*WizardScreen.BINDINGS, Binding("enter", "finish", show=False)]
 
     CHEAT_SHEET = (
-        "rig                    open the TUI\n"
-        "rig \"fix the test\"     one-shot\n"
+        "omega                    open the TUI\n"
+        "omega \"fix the test\"     one-shot\n"
         "/model  or ctrl+o      switch models          /plan · /build   switch modes\n"
-        "rig setup              full browser setup: more providers, roles, MCP servers")
+        "omega setup              full browser setup: more providers, roles, MCP servers")
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="panel"):

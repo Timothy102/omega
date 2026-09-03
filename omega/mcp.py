@@ -50,7 +50,7 @@ def prune_schema(node: Any, depth: int = 0) -> Any:
     """Strip JSON Schema down to what a model needs to CALL a tool.
 
     Measured on linear+notion+posthog: descriptions were 59.5k chars, parameters
-    143k. rig previously capped descriptions and passed parameters untouched --
+    143k. omega previously capped descriptions and passed parameters untouched --
     exactly backwards, since descriptions are what tool selection depends on.
     """
     if isinstance(node, list):
@@ -103,11 +103,11 @@ def fit_params(schema: dict[str, Any]) -> dict[str, Any]:
     return pruned
 
 
-def discover(paths: list[Path] | None = None, include_rig: bool = True) -> dict[str, dict[str, Any]]:
-    """rig's own mcp block wins; Claude Code's config and installed plugins
-    (which ship their own .mcp.json) are imported under it. `include_rig=False`
+def discover(paths: list[Path] | None = None, include_omega: bool = True) -> dict[str, dict[str, Any]]:
+    """omega's own mcp block wins; Claude Code's config and installed plugins
+    (which ship their own .mcp.json) are imported under it. `include_omega=False`
     returns Claude Code's servers only -- used to show what's importable
-    without mixing in what rig already manages."""
+    without mixing in what omega already manages."""
     if paths is None:
         paths = [Path.home() / ".claude.json", Path.home() / ".claude" / "settings.json"]
         plugins = Path.home() / ".claude" / "plugins"
@@ -134,12 +134,12 @@ def discover(paths: list[Path] | None = None, include_rig: bool = True) -> dict[
             except json.JSONDecodeError:
                 continue
 
-    if not include_rig:
+    if not include_omega:
         return found
-    rig_cfg = Path(os.environ.get("RIG_CONFIG", Path.home() / ".rig" / "config.json"))
-    if rig_cfg.exists():
+    omega_cfg = Path(os.environ.get("OMEGA_CONFIG", Path.home() / ".omega" / "config.json"))
+    if omega_cfg.exists():
         try:
-            found.update(json.loads(rig_cfg.read_text()).get("mcp", {}))
+            found.update(json.loads(omega_cfg.read_text()).get("mcp", {}))
         except json.JSONDecodeError:
             pass
     return found
@@ -190,7 +190,7 @@ class Server:
     async def _run(self) -> None:
         # NamedTemporaryFile's wrapper type isn't a TextIO as far as mypy is
         # concerned; fdopen over its fd is, and gives the same file.
-        fd, path = tempfile.mkstemp(prefix="rig-mcp-", suffix=".log")
+        fd, path = tempfile.mkstemp(prefix="omega-mcp-", suffix=".log")
         self._errlog_path = Path(path)
         errlog = os.fdopen(fd, "w")
         try:
@@ -300,7 +300,7 @@ def _unregister(name: str) -> None:
 
 
 async def load(only: set[str] | None = None, timeout: float = 60) -> dict[str, str]:
-    """Eager path: connect everything now, in a loop (`rig --mcp`). Lazy
+    """Eager path: connect everything now, in a loop (`omega --mcp`). Lazy
     loading (ensure_loaded, below) is what a normal turn uses instead."""
     report: dict[str, str] = {}
     for name, cfg in discover().items():
@@ -353,7 +353,7 @@ def _write_mcp(data: dict[str, dict[str, Any]]) -> None:
 
 
 def status() -> dict[str, ServerStatus]:
-    """One row per server rig itself has configured (config.mcp_config()) --
+    """One row per server omega itself has configured (config.mcp_config()) --
     not what discover() would merge in from Claude Code, which the caller
     surfaces separately as "importable"."""
     out: dict[str, ServerStatus] = {}

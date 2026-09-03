@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-from rig import tools
-from rig.llm import ToolCall
-from rig.memory import store
+from omega import tools
+from omega.llm import ToolCall
+from omega.memory import store
 
 
 def call(name, **args):
@@ -139,6 +139,6 @@ async def test_link_rejects_invalid_relation(git_cwd):
 
 
 def test_permissions_allow_remember_supersede_link():
-    from rig import permissions
+    from omega import permissions
     for name in ("remember", "supersede", "link"):
         assert permissions.decide(name, {})[0] == permissions.ALLOW

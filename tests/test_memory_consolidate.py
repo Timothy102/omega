@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from rig import config, llm
-from rig.memory import consolidate, store
+from omega import config, llm
+from omega.memory import consolidate, store
 
 
 @pytest.fixture(autouse=True)

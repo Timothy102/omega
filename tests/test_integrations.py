@@ -1,6 +1,6 @@
 import json
 
-from rig import integrations
+from omega import integrations
 
 
 def test_dict_key_matches_integration_key():
@@ -46,7 +46,7 @@ def test_imported_from_claude_code_never_leaks_env_values(monkeypatch):
         "slack": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-slack"],
                   "env": {"SLACK_BOT_TOKEN": "xoxb-super-secret-value"}},
     }
-    monkeypatch.setattr(integrations.mcp, "discover", lambda include_rig=True: fake)
+    monkeypatch.setattr(integrations.mcp, "discover", lambda include_omega=True: fake)
     out = integrations.imported_from_claude_code()
     dumped = json.dumps(out)
     assert "xoxb-super-secret-value" not in dumped
@@ -59,7 +59,7 @@ def test_imported_from_claude_code_redacts_inline_header_tokens(monkeypatch):
             "-y", "mcp-remote@0.8.1", "https://mcp.linear.app/mcp",
             "--header", "Authorization:Bearer sekrit-token"]},
     }
-    monkeypatch.setattr(integrations.mcp, "discover", lambda include_rig=True: fake)
+    monkeypatch.setattr(integrations.mcp, "discover", lambda include_omega=True: fake)
     out = integrations.imported_from_claude_code()
     dumped = json.dumps(out)
     assert "sekrit-token" not in dumped
@@ -67,12 +67,12 @@ def test_imported_from_claude_code_redacts_inline_header_tokens(monkeypatch):
 
 
 def test_imported_from_claude_code_uses_claude_only_view(monkeypatch):
-    """include_rig=False must be what's passed -- otherwise rig's own servers
+    """include_omega=False must be what's passed -- otherwise omega's own servers
     would masquerade as "found in Claude Code"."""
     seen = {}
-    def fake_discover(include_rig=True):
-        seen["include_rig"] = include_rig
+    def fake_discover(include_omega=True):
+        seen["include_omega"] = include_omega
         return {}
     monkeypatch.setattr(integrations.mcp, "discover", fake_discover)
     integrations.imported_from_claude_code()
-    assert seen["include_rig"] is False
+    assert seen["include_omega"] is False

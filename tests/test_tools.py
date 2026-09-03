@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from rig import tools
-from rig.llm import ToolCall
+from omega import tools
+from omega.llm import ToolCall
 
 
 def call(name, **args):

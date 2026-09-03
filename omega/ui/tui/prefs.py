@@ -1,5 +1,5 @@
-"""Per-machine TUI preferences persisted at ~/.rig/ui.json -- separate from
-~/.rig/config.json, which holds provider/model/role configuration, not UI
+"""Per-machine TUI preferences persisted at ~/.omega/ui.json -- separate from
+~/.omega/config.json, which holds provider/model/role configuration, not UI
 state like whether the side panel is open."""
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-PATH = Path(os.environ.get("RIG_UI_PREFS", Path.home() / ".rig" / "ui.json"))
+PATH = Path(os.environ.get("OMEGA_UI_PREFS", Path.home() / ".omega" / "ui.json"))
 
 
 def load() -> dict[str, Any]:

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from rig import config
+from omega import config
 
 
 def write_config(tmp_path, data):

@@ -1,4 +1,4 @@
-"""The catalog of well-known public MCP servers `rig connections` can offer,
+"""The catalog of well-known public MCP servers `omega connections` can offer,
 plus a read-only view of whatever Claude Code already has configured.
 
 `verified=True` means the url/command was confirmed against the vendor's own
@@ -247,16 +247,16 @@ def _sanitized(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def imported_from_claude_code() -> dict[str, dict[str, Any]]:
-    """Servers rig's own mcp.discover() picked up from ~/.claude.json and
+    """Servers omega's own mcp.discover() picked up from ~/.claude.json and
     installed plugins, formatted for display -- names and shapes only, no
     tokens or header values."""
-    return {name: _sanitized(cfg) for name, cfg in mcp.discover(include_rig=False).items()}
+    return {name: _sanitized(cfg) for name, cfg in mcp.discover(include_omega=False).items()}
 
 
 def overview() -> list[dict[str, Any]]:
-    """One row per server: what rig has configured, what the catalog offers
+    """One row per server: what omega has configured, what the catalog offers
     that isn't configured yet, and what Claude Code has that isn't either --
-    the shared data behind `rig connections` and the setup page's Tools step."""
+    the shared data behind `omega connections` and the setup page's Tools step."""
     configured = mcp.status()
     raw = config.mcp_config()
     rows: list[dict[str, Any]] = []

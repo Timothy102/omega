@@ -1,6 +1,6 @@
 import pytest
 
-from rig import artifacts
+from omega import artifacts
 
 
 @pytest.fixture(autouse=True)

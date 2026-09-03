@@ -1,8 +1,8 @@
-"""First-run setup: get `~/.rig/config.json` into a working state without
-the full browser flow (`rig setup`). `run()` picks the Textual wizard on a
+"""First-run setup: get `~/.omega/config.json` into a working state without
+the full browser flow (`omega setup`). `run()` picks the Textual wizard on a
 real terminal and falls back to `run_plain()` (the original `input()` flow)
 otherwise; both share the provider presets, catalog, and config-merge logic
-in this module. No Textual imports here -- `rig/ui/tui/onboarding.py` is the
+in this module. No Textual imports here -- `omega/ui/tui/onboarding.py` is the
 only place that knows about widgets."""
 import asyncio
 import getpass
@@ -137,7 +137,7 @@ async def validate_key(choice: _Choice, key: str) -> tuple[bool, str]:
 
 
 async def run() -> bool:
-    """Entry point for both `rig onboard` and the first-run gate: the
+    """Entry point for both `omega onboard` and the first-run gate: the
     Textual wizard on a real terminal, the original `input()` flow otherwise
     (piped/scripted invocations, or a dumb terminal)."""
     if sys.stdin.isatty() and sys.stdout.isatty():
@@ -164,7 +164,7 @@ async def _ask_choice(prompt: str, options: list[str], default: int = 1) -> int:
 
 
 async def run_plain() -> None:
-    print("rig needs a model to drive it -- let's set one up (`rig setup` opens the full browser flow).")
+    print("omega needs a model to drive it -- let's set one up (`omega setup` opens the full browser flow).")
     pick = await _ask_choice("Pick a provider:",
                              ["Anthropic (native)", "OpenRouter", "Other OpenAI-compatible"])
 
@@ -204,6 +204,6 @@ async def run_plain() -> None:
     except Exception as e:
         print(f"test turn failed ({type(e).__name__}: {e}) -- config is saved; check the key and retry.")
 
-    print("\nrig                    interactive TUI\n"
-          "rig \"do the thing\"     one-shot\n"
-          "rig setup              full browser setup, more providers/roles/MCP")
+    print("\nomega                    interactive TUI\n"
+          "omega \"do the thing\"     one-shot\n"
+          "omega setup              full browser setup, more providers/roles/MCP")

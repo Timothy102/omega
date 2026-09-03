@@ -3,8 +3,8 @@ import json
 import pytest
 from textual.widgets import Input
 
-from rig import config, events, loop, onboarding
-from rig.ui.tui.onboarding import (
+from omega import config, events, loop, onboarding
+from omega.ui.tui.onboarding import (
     DoneScreen,
     KeyScreen,
     ModelScreen,

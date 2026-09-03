@@ -47,7 +47,7 @@ def _render(sections: Sections) -> str:
 def preamble(cwd: str | None = None, budget_tokens: int = 500) -> str:
     scored: list[tuple[str, float, Node]] = []
     # Reading must never create a project db as a side effect -- that would
-    # bootstrap .gitignore for a directory the user never asked rig to touch.
+    # bootstrap .gitignore for a directory the user never asked omega to touch.
     if store.db_exists("project", cwd):
         for node in store.all_nodes("project", cwd=cwd):
             if _eligible(node):

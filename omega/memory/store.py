@@ -9,7 +9,7 @@ from typing import Any
 
 Node = dict[str, Any]
 
-GLOBAL_DIR = Path.home() / ".rig" / "memory"
+GLOBAL_DIR = Path.home() / ".omega" / "memory"
 
 SCOPES = {"global", "project"}
 TYPES = {"fact", "preference", "decision", "entity", "file_note", "open_question"}
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 
 def project_dir(cwd: str | None = None) -> Path:
-    return Path(cwd or os.getcwd()) / ".rig"
+    return Path(cwd or os.getcwd()) / ".omega"
 
 
 def _db_path(scope: str, cwd: str | None = None) -> Path:
@@ -79,7 +79,7 @@ def _bootstrap_project(cwd: str | None = None) -> None:
     if not (root / ".git").is_dir():
         return
     gitignore = root / ".gitignore"
-    line = ".rig/"
+    line = ".omega/"
     existing = gitignore.read_text() if gitignore.exists() else ""
     if line in existing.splitlines():
         return

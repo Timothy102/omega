@@ -8,7 +8,7 @@ from typing import Any
 
 Message = dict[str, Any]
 
-DIR = Path.home() / ".rig" / "sessions"
+DIR = Path.home() / ".omega" / "sessions"
 
 # Shared with __main__'s resumed-session marker so UIs can identify and
 # exclude it from turn/message counts shown to the user.
@@ -70,7 +70,7 @@ def load(sid: str) -> Session:
     if not p.exists():
         matches = sorted(DIR.glob(f"{sid}*.json")) if DIR.exists() else []
         if not matches:
-            raise SystemExit(f"rig: no session {sid!r}")
+            raise SystemExit(f"omega: no session {sid!r}")
         p = matches[-1]
     raw = json.loads(p.read_text())
     known = set(Session.__dataclass_fields__)

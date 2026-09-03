@@ -1,7 +1,7 @@
 
 import pytest
 
-from rig import permissions as P
+from omega import permissions as P
 
 
 @pytest.mark.parametrize("command,expected", [
@@ -31,7 +31,7 @@ def test_writes_inside_cwd_allowed_outside_asked(tmp_path):
 
 
 def test_config_and_credentials_are_never_askable(tmp_path):
-    for path in ("~/.rig/config.json", "~/.ssh/authorized_keys", "~/.claude.json"):
+    for path in ("~/.omega/config.json", "~/.rig/config.json", "~/.ssh/authorized_keys", "~/.claude.json"):
         assert P.decide("write", {"path": path}, cwd=str(tmp_path))[0] == P.DENY
 
 

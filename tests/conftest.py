@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from rig import tools
+from omega import tools
 
 
 class Chunk:
@@ -28,7 +28,7 @@ def clean_tool_state(tmp_path, monkeypatch):
     tools.CONFIRM = None
     tools.set_tainted(False)
     monkeypatch.chdir(tmp_path)
-    from rig import permissions
+    from omega import permissions
     monkeypatch.setattr(permissions, "STORE", tmp_path / "permissions.json")
     yield
     tools.CONFIRM = None

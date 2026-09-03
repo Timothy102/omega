@@ -1,4 +1,4 @@
-"""~/.rig/history file-backed line history with up/down cycling. Pure Python
+"""~/.omega/history file-backed line history with up/down cycling. Pure Python
 (no Textual dependency) so it is trivially unit-testable and reusable if
 another front end ever wants it."""
 from __future__ import annotations

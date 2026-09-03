@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from rig import gitlog
+from omega import gitlog
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 

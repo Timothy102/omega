@@ -6,14 +6,14 @@ import pytest
 from rich.markdown import Markdown
 from textual.widgets import Input, Static
 
-from rig import artifacts, events, gitlog, loop, session
-from rig.config import Model
-from rig.ui import tui
-from rig.ui.tui import prefs
-from rig.ui.tui.modals import AskUserScreen, ConfirmScreen, ModelPickerScreen
-from rig.ui.tui.sidebar import GitTab, Sidebar
-from rig.ui.tui.status import StatusBar
-from rig.ui.tui.transcript import Transcript
+from omega import artifacts, events, gitlog, loop, session
+from omega.config import Model
+from omega.ui import tui
+from omega.ui.tui import prefs
+from omega.ui.tui.modals import AskUserScreen, ConfirmScreen, ModelPickerScreen
+from omega.ui.tui.sidebar import GitTab, Sidebar
+from omega.ui.tui.status import StatusBar
+from omega.ui.tui.transcript import Transcript
 
 
 class FakeProvider:
@@ -49,7 +49,7 @@ class FakeCfg:
         for alias, m in self.models.items():
             if m.model == text:
                 return alias
-        raise SystemExit(f"rig: unknown model {text!r}; have {sorted(self.models)}")
+        raise SystemExit(f"omega: unknown model {text!r}; have {sorted(self.models)}")
 
 
 async def _fake_discover_repos(root, max_depth=2):
@@ -68,9 +68,9 @@ def isolate(tmp_path, monkeypatch):
     yield
 
 
-def make_app() -> tui.RigApp:
+def make_app() -> tui.OmegaApp:
     sess = session.Session.new(cwd=str(Path.cwd()))
-    return tui.RigApp(FakeCfg(), sess, "build", sess.history)
+    return tui.OmegaApp(FakeCfg(), sess, "build", sess.history)
 
 
 def _texts(widget) -> list[str]:

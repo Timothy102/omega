@@ -1,4 +1,4 @@
-from rig import events
+from omega import events
 
 
 def test_text_delta_construction_and_equality():
