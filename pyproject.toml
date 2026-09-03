@@ -6,8 +6,21 @@ build-backend = "hatchling.build"
 name = "omega-code"
 version = "0.3.0"
 description = "A fast personal coding agent harness"
+readme = "README.md"
 license = "MIT"
+authors = [{name = "Tim Cvetko"}]
 requires-python = ">=3.11"
+keywords = ["coding-agent", "cli", "llm", "agent", "harness", "anthropic", "openai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "openai>=2,<3",
     "mcp>=1.9,<2",
@@ -17,6 +30,11 @@ dependencies = [
     "anthropic>=1.2.0",
     "pyyaml>=6.0.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Timothy102/omega"
+Repository = "https://github.com/Timothy102/omega"
+Issues = "https://github.com/Timothy102/omega/issues"
 
 [dependency-groups]
 dev = [
