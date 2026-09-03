@@ -64,6 +64,19 @@ def _chips(counter: Counter[str]) -> str:
     return "  ".join(chips)
 
 
+def _context_bar(used: int, limit: int, cells: int = 8) -> str:
+    """`▰▰▱▱▱▱▱▱ 10.4k / 1.0M · 1%` -- at least one cell fills as soon as
+    anything has been used, so a near-empty context window doesn't read as a
+    dead bar."""
+    if limit <= 0:
+        return f"{'▱' * cells} {format.fmt_num(used)} / – · –"
+    pct = used / limit
+    filled = max(1, round(pct * cells)) if used > 0 else 0
+    filled = min(cells, filled)
+    bar = "▰" * filled + "▱" * (cells - filled)
+    return f"{bar} {format.fmt_num(used)} / {format.fmt_num(limit)} · {pct * 100:.0f}%"
+
+
 def _files_block(files: dict[str, set[str]], limit: int = 15) -> str:
     if not files:
         return "[dim](none)[/dim]"
@@ -99,8 +112,15 @@ class SessionTab(VerticalScroll):
         self._artifacts = 0
         self._mcp_servers: set[str] = set()
         self._usage: events.Usage | None = None
+        # alias -> {"prompt": n, "completion": n}, priced against
+        # `omega.eval.prices` for the MODEL card's running "$ so far" -- kept
+        # here rather than read off `OmegaApp` so this widget stays paintable
+        # from its own recorded events alone.
+        self._usage_totals: dict[str, dict[str, int]] = {}
         self._last_model: tuple[str | None, str] = (None, "?")
         self._touched = touched if touched is not None else set()
+        self._turn_started: float | None = None
+        self._turn_elapsed = 0.0
 
     def compose(self) -> ComposeResult:
         yield self._body
@@ -114,7 +134,22 @@ class SessionTab(VerticalScroll):
         self._files_turn.clear()
         self._pending_files.clear()
         self._subagents_turn.clear()
+        self._turn_started = time.monotonic()
+        self._turn_elapsed = 0.0
         self._repaint()
+
+    def note_phase(self, state: str) -> None:
+        """Freezes THIS TURN's elapsed time once the turn goes idle -- the
+        1s repaint interval would otherwise keep advancing it forever."""
+        if state == "idle" and self._turn_started is not None:
+            self._turn_elapsed = time.monotonic() - self._turn_started
+            self._turn_started = None
+            self._repaint()
+
+    def _turn_elapsed_seconds(self) -> float:
+        if self._turn_started is not None:
+            return time.monotonic() - self._turn_started
+        return self._turn_elapsed
 
     def set_session(self, sess: session.Session) -> None:
         """`/sessions`: point this tab at a freshly resumed session -- turn
@@ -128,6 +163,10 @@ class SessionTab(VerticalScroll):
 
     def record_usage(self, ev: events.Usage) -> None:
         self._usage = ev
+        alias = self._last_model[0] or self._last_model[1]
+        totals = self._usage_totals.setdefault(alias, {"prompt": 0, "completion": 0})
+        totals["prompt"] += ev.prompt_tokens
+        totals["completion"] += ev.completion_tokens
         self._repaint()
 
     def record_tool_start(self, ev: events.ToolStart) -> None:
@@ -169,22 +208,38 @@ class SessionTab(VerticalScroll):
         self._sub_start.pop(ev.subagent_id, None)
         self._repaint()
 
+    def _cost_so_far(self) -> float:
+        from ...eval import prices
+
+        total = 0.0
+        for alias, t in self._usage_totals.items():
+            cost = prices.estimate_cost(alias, t["prompt"], t["completion"])
+            if cost is not None:
+                total += cost
+        return total
+
+    def _session_tokens(self) -> int:
+        return sum(t["prompt"] + t["completion"] for t in self._usage_totals.values())
+
     def _repaint(self) -> None:
         width = self.size.width or 28
         alias, model = self._last_model
-        header = f"[bold]{alias}[/bold] · {model}" if alias else model
-        used = format.fmt_num(self._usage.used) if self._usage else "–"
-        limit = format.fmt_num(self._usage.limit) if self._usage else "–"
+        used = self._usage.used if self._usage else 0
+        limit = self._usage.limit if self._usage else 0
 
-        lines = [header, f"[dim]tokens {used}/{limit} · {self._sess.turns} turns[/dim]", ""]
+        lines = [_section("model", width)]
+        lines.append(f"[bold]{alias}[/bold] · {model}" if alias else model)
+        lines.append(_context_bar(used, limit))
+        lines.append(f"${self._cost_so_far():.2f}")
+        lines.append("")
+
         lines.append(_section("this turn", width))
+        lines.append(f"[dim]{self._turn_elapsed_seconds():.0f}s[/dim]")
         if self._tool_turn:
             lines.append(_chips(self._tool_turn))
         if self._files_turn:
             lines.append("[dim]FILES[/dim]")
             lines.append(_files_block(self._files_turn))
-        if not self._tool_turn and not self._files_turn:
-            lines.append("[dim](none yet)[/dim]")
         for sid, tier in self._subagents_turn:
             started = self._sub_start.get(sid)
             if started is not None:
@@ -193,17 +248,17 @@ class SessionTab(VerticalScroll):
                 lines.append(f"[dim]{frame} {format.esc(tier)} · {format.esc(sid)} · {elapsed:.0f}s[/dim]")
             else:
                 lines.append(f"[green]✓[/green] [dim]{format.esc(tier)} · {format.esc(sid)}[/dim]")
+        lines.append("")
 
-        if self._tool_turn != self._tool_session or self._files_turn != self._files_session:
-            lines.append("")
-            lines.append(_section("session totals", width))
-            lines.append(_chips(self._tool_session))
-            lines.append(f"[dim]{self._memory_recalls} recalls · {self._memory_writes} writes[/dim]")
-            lines.append(f"[dim]{self._artifacts} artifacts[/dim]")
+        lines.append(_section("totals", width))
+        lines.append(f"[dim]{self._sess.turns} turns · {format.fmt_num(self._session_tokens())} tokens · "
+                     f"{sum(self._tool_session.values())} tools · {self._artifacts} artifacts[/dim]")
+        lines.append(f"[dim]{self._memory_recalls} recalls · {self._memory_writes} writes[/dim]")
+        if self._files_session:
             lines.append("[dim]FILES[/dim]")
             lines.append(_files_block(self._files_session))
-            if self._mcp_servers:
-                lines.append(f"[dim]mcp: {', '.join(sorted(self._mcp_servers))}[/dim]")
+        if self._mcp_servers:
+            lines.append(f"[dim]mcp: {', '.join(sorted(self._mcp_servers))}[/dim]")
         self._body.update("\n".join(lines))
 
 
@@ -258,16 +313,19 @@ class GitTab(VerticalScroll):
         if not repos:
             self.mount(Static(f"[dim]no git repositories under {format.esc(self._cwd)}[/dim]"))
             return
-        for repo in repos:
+        for i, repo in enumerate(repos):
+            if i:
+                self.mount(Static(""))
             await self._mount_repo(repo)
 
     async def _mount_repo(self, repo: gitlog.Repo) -> None:
         changes = await gitlog.working_tree_async(repo)
         commits = await gitlog.recent_commits_async(repo, limit=10)
+        width = self.size.width or 28
         dirty = "  [yellow]●[/yellow] [dim]dirty[/dim]" if repo.dirty else ""
         self.mount(Static(f"[bold]{format.esc(repo.name)}[/bold]  "
                           f"[dim]{format.esc(repo.branch)}[/dim]{dirty}"))
-        self.mount(Static("[dim]CHANGES[/dim]"))
+        self.mount(Static(_section("changes", width)))
         if not changes:
             self.mount(Static("[dim]  (clean)[/dim]"))
         else:
@@ -283,16 +341,18 @@ class GitTab(VerticalScroll):
 class ConnectionsTab(VerticalScroll):
     def __init__(self) -> None:
         super().__init__()
+        self._header = Static("")
         self._body = Static("[dim]loading…[/dim]")
 
     def compose(self) -> ComposeResult:
+        yield self._header
         yield self._body
-        yield Static("[dim]omega connections[/dim]")
 
     def on_mount(self) -> None:
         self.refresh_status()
 
     def refresh_status(self) -> None:
+        self._header.update(_section("connections", self.size.width or 28))
         self.run_worker(self._load(), exclusive=True)
 
     async def _load(self) -> None:

@@ -283,7 +283,10 @@ def describe_outcome(name: str, text: str, duration_s: float, offloaded: bool,
     stripped = text.strip()
     if stripped.startswith("error:"):
         detail = _UNTRUSTED_WRAP_RE.sub("", stripped[len('error:'):].strip()).strip()
-        return f"→ error: {_truncate(detail, 200)}"
+        # Truncated at the offload threshold, not the ~200 chars the TUI's
+        # collapsed row actually shows -- the extra length is what makes the
+        # row's expand-on-enter affordance have something real to reveal.
+        return f"→ error: {_truncate(detail, 4000)}"
 
     parts: list[str] = []
     no_hits = stripped in ("(no matches)", "")

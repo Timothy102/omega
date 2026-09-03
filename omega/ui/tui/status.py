@@ -26,15 +26,12 @@ class StatusState:
     phase: str = "idle"
 
 
-def _fmt_tokens(n: int) -> str:
-    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
-
-
 def _fmt_usage(usage: events.Usage | None) -> str:
+    """`10.4k/1.0M` -- `ui_format.fmt_num` switches to the `M` scale above a
+    million, unlike a bare `n/1000` division that would print `1048.6k`."""
     if usage is None:
         return "–"
-    pct = (usage.used / usage.limit * 100) if usage.limit else 0.0
-    return f"{_fmt_tokens(usage.used)}/{_fmt_tokens(usage.limit)} ({pct:.0f}%)"
+    return f"{ui_format.fmt_num(usage.used)}/{ui_format.fmt_num(usage.limit)}"
 
 
 def _fmt_cache(usage: events.Usage | None) -> str:
@@ -46,25 +43,19 @@ def _fmt_cache(usage: events.Usage | None) -> str:
     return f" · [dim]cache {pct:.0f}%[/dim]"
 
 
-HINT_TEXT = "ctrl+b panel · ctrl+o model · /help · ctrl+c cancel"
+HINT_TEXT = "ctrl+b panel · ctrl+o model · shift+tab mode · /help"
 
 
 def format_status(state: StatusState, *, width: int | None = None) -> str:
     tokens = _fmt_usage(state.usage)
     cache = _fmt_cache(state.usage)
     model = f"{state.alias} · {state.model}" if state.alias else state.model
-    head = f" {state.mode} · {model} · tokens {tokens}{cache}"
-    full = f"{head} · {state.session_id} · turns {state.turns}"
+    full = f" {state.mode} · {model} · {tokens}{cache}"
     if width is None or len(full) <= width:
         return full
-    # Narrow terminal: drop the session id first, then turns, then the model
-    # id -- the alias alone still says which model is in use.
-    no_session = f"{head} · turns {state.turns}"
-    if len(no_session) <= width:
-        return no_session
-    if len(head) <= width:
-        return head
-    alias_only = f" {state.mode} · {state.alias or state.model} · tokens {tokens}{cache}"
+    # Narrow terminal: drop the raw model id first -- the alias alone still
+    # says which model is in use.
+    alias_only = f" {state.mode} · {state.alias or state.model} · {tokens}{cache}"
     return alias_only if len(alias_only) <= width else alias_only[:width]
 
 

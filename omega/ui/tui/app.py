@@ -7,11 +7,12 @@ import asyncio
 import difflib
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Input, Static
 from textual.worker import Worker
@@ -28,14 +29,20 @@ from .transcript import Transcript
 
 _MODE_ROLE = {"build": "main", "plan": "plan", "discuss": "discuss"}
 _MODE_TAG_STYLE = {"build": "dim", "plan": "yellow", "discuss": "$accent"}
+_MODE_CYCLE = ["build", "plan", "discuss"]
 
 _COMMANDS = ["/plan", "/build", "/discuss", "/mode", "/memory-gc", "/model", "/sidebar",
             "/cost", "/export", "/compact", "/undo", "/diff", "/verify", "/sessions",
             "/help", "/quit"]
 
 _HELP_TEXT = (
-    "ctrl+c cancel turn  ·  ctrl+o /model switch model  ·  ctrl+b toggle side panel\n"
+    "ctrl+c cancel turn  ·  ctrl+o /model switch model  ·  ctrl+b toggle side panel  ·  "
+    "shift+tab cycle mode\n"
     "ctrl+1/2/3 or [ ] switch side-panel tab  ·  up/down input history\n"
+    "input line editing: ctrl+u clear line  ·  ctrl+w/alt+backspace delete word back  ·  "
+    "alt+d delete word forward\n"
+    "ctrl+k delete to end  ·  ctrl+a/ctrl+e home/end  ·  alt+left/right word jump  ·  "
+    "esc clear input (idle only)\n"
     "/plan /build /discuss switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  /memory-gc\n"
     "/cost tokens & $  ·  /export [path]  ·  /compact  ·  /undo [n]  ·  /diff  ·  /verify  ·  "
     "/sessions  ·  /quit")
@@ -78,15 +85,42 @@ class HeaderBar(Static):
         self.update(f"[bold]⌘ omega[/bold]  [dim]{' · '.join(bits)}[/dim]")
 
 
+class PromptInput(Input):
+    """The `#prompt` input. Textual's `Input` already binds the readline-ish
+    keys most people expect (`ctrl+a/e` home/end, `ctrl+w` delete word back,
+    `ctrl+u` delete-to-start, `ctrl+k` delete-to-end, `ctrl+left/right` word
+    jump) -- this only adds what it lacks: `alt+left/right` word jump,
+    `alt+d` delete word forward, and an idle-only `escape` to clear the
+    line. It also RE-POINTS `alt+backspace`, which Textual's own `Input`
+    binds to `delete_right_word` (deleting forward, the wrong direction for
+    a key most terminals send for "delete the previous word")."""
+
+    BINDINGS = [
+        Binding("alt+left", "cursor_left_word", show=False),
+        Binding("alt+right", "cursor_right_word", show=False),
+        Binding("alt+d", "delete_right_word", show=False),
+        Binding("alt+backspace", "delete_left_word", show=False),
+        Binding("escape", "clear_when_idle", show=False),
+    ]
+
+    def action_clear_when_idle(self) -> None:
+        # A running turn disables this widget already, so it can't normally
+        # be focused mid-turn -- checked anyway since ctrl+c, not escape, is
+        # the documented way to cancel a running turn.
+        if cast("OmegaApp", self.app)._turn_worker is not None:
+            return
+        self.clear()
+
+
 class OmegaApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #header { height: 1; }
     #body { height: 1fr; }
-    #input-rule { height: 1; }
-    #input-row { height: 1; }
+    #input-box { height: 3; border: round $surface-lighten-2; padding: 0 1; }
+    #input-box:focus-within { border: round $accent; }
+    #mode-tag { width: auto; padding: 0 1 0 0; }
     #prompt { width: 1fr; }
-    #mode-tag { width: auto; padding: 0 1; }
     #prompt.-plan-mode { color: $warning; }
     #prompt.-discuss-mode { color: $accent; }
     """
@@ -97,6 +131,7 @@ class OmegaApp(App[None]):
         # for Enter, so it would fire the input's submit binding instead.
         Binding("ctrl+o", "pick_model", "Model", show=False, priority=True),
         Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False, priority=True),
+        Binding("shift+tab", "cycle_mode", "Cycle mode", show=False, priority=True),
         Binding("ctrl+1", "show_tab(0)", "Session", show=False, priority=True),
         Binding("ctrl+2", "show_tab(1)", "Git", show=False, priority=True),
         Binding("ctrl+3", "show_tab(2)", "Connections", show=False, priority=True),
@@ -135,11 +170,11 @@ class OmegaApp(App[None]):
         with Horizontal(id="body"):
             yield Transcript(id="transcript")
             yield Sidebar(self.sess, id="sidebar")
-        yield Static("", id="input-rule")
-        with Horizontal(id="input-row"):
-            yield Input(id="prompt", placeholder="❯ ", compact=True)
-            yield Static("", id="mode-tag")
         yield StatusBar(id="status")
+        with Horizontal(id="input-box"):
+            yield Static("", id="mode-tag")
+            yield PromptInput(id="prompt", placeholder="Ask omega… (shift+tab to change mode)",
+                              compact=True)
 
     def on_mount(self) -> None:
         # Deferred import: reads the CURRENT `omega.ui.tui.HISTORY`, so tests
@@ -150,7 +185,6 @@ class OmegaApp(App[None]):
         self.query_one(Transcript).set_session(self.sess.id)
         self._refresh_status()
         self._apply_mode_style()
-        self._update_input_rule()
         self._refresh_header()
         if self.history:
             self._show_resumed()
@@ -165,13 +199,6 @@ class OmegaApp(App[None]):
         turns = sum(1 for m in hist if m.get("role") == "user")
         ago = format.relative_age(time.time() - self.sess.updated) if self.sess.updated else ""
         self.query_one(Transcript).add_resumed(self.sess.id, turns, len(hist), self.sess.cwd, ago)
-
-    def _update_input_rule(self) -> None:
-        rule = self.query_one("#input-rule", Static)
-        basename = Path(self.sess.cwd).name or self.sess.cwd
-        width = rule.size.width or 78
-        bar = "─" * max(1, width - len(basename) - 1)
-        rule.update(f"[dim]{bar} {basename}[/dim]")
 
     def _refresh_header(self, *, force: bool = False) -> None:
         self.run_worker(self._load_header(force=force), exclusive=False, thread=False)
@@ -192,7 +219,7 @@ class OmegaApp(App[None]):
         prompt.set_class(self.mode == "plan", "-plan-mode")
         prompt.set_class(self.mode == "discuss", "-discuss-mode")
         style = _MODE_TAG_STYLE.get(self.mode, "dim")
-        self.query_one("#mode-tag", Static).update(f"[{style}]{self.mode}[/{style}]")
+        self.query_one("#mode-tag", Static).update(f"[{style}]{self.mode}[/{style}] [bold]›[/bold]")
 
     def _refresh_status(self) -> None:
         role_name = self._role_name()
@@ -245,6 +272,7 @@ class OmegaApp(App[None]):
             case events.Phase(state=state):
                 self._phase = state
                 transcript.note_phase(state)
+                sidebar.session_tab.note_phase(state)
                 self._refresh_status()
             case events.TextDelta(text=text):
                 transcript.add_text_delta(text)
@@ -506,6 +534,20 @@ class OmegaApp(App[None]):
 
     def action_pick_model(self) -> None:
         self.run_worker(self._pick_model(), exclusive=False, thread=False)
+
+    def action_cycle_mode(self) -> None:
+        # A priority binding fires regardless of focus, including inside a
+        # modal -- restore its own shift+tab (focus_previous, Screen's
+        # default) there instead of silently swallowing the key.
+        if isinstance(self.screen, ModalScreen):
+            self.screen.focus_previous()
+            return
+        available = [m for m in _MODE_CYCLE if m != "discuss" or "discuss" in loop.MODES]
+        idx = available.index(self.mode) if self.mode in available else -1
+        self.mode = available[(idx + 1) % len(available)]
+        self.query_one(Transcript).add_mode_switch(self.mode)
+        self._apply_mode_style()
+        self._refresh_status()
 
     def action_toggle_sidebar(self) -> None:
         self._sidebar_visible = not self._sidebar_visible

@@ -16,7 +16,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from rich.console import RenderableType
 from rich.markdown import Markdown
+from rich.table import Table
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.events import Click
@@ -28,6 +30,24 @@ from .. import format
 from .status import SPINNER_FRAMES
 
 _GROUP_CAP = 3
+_ERROR_ROW_CHARS = 200
+
+
+def _bulleted(body: RenderableType) -> Table:
+    """`body` with a leading `●` gutter -- a plain string prefix like
+    `"●  text"` wraps flush-left, losing the bullet's visual separation the
+    moment a sentence overruns one line; a 3-col grid column keeps every
+    wrapped continuation line indented under the text, not the bullet."""
+    grid = Table.grid()
+    grid.add_column(width=3)
+    grid.add_column(ratio=1)
+    grid.add_row("[bold]●[/bold]  ", body)
+    return grid
+
+
+def _flatten_truncate(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 @dataclass
@@ -59,6 +79,32 @@ class _MoreLine(Static, can_focus=True):
 
     def action_activate(self) -> None:
         self._click_cb()
+
+
+class _ErrorLine(Static, can_focus=True):
+    """A tool's `└ error: …` sub-line, truncated to `_ERROR_ROW_CHARS` --
+    focusable, expands to the full (still-wrapped) error text on enter/click,
+    mirroring `_MoreLine`'s one-way collapsed-group expansion."""
+
+    DEFAULT_CSS = """
+    _ErrorLine { height: auto; }
+    _ErrorLine:focus { text-style: underline; }
+    """
+    BINDINGS = [Binding("enter", "activate", show=False)]
+
+    def __init__(self, short: str, full: str) -> None:
+        super().__init__(short)
+        self._full = full
+        self._expanded = False
+
+    def on_click(self, event: Click) -> None:
+        self.action_activate()
+
+    def action_activate(self) -> None:
+        if self._expanded:
+            return
+        self._expanded = True
+        self.update(self._full)
 
 
 class _EmptyState(Static):
@@ -303,7 +349,20 @@ class Transcript(VerticalScroll):
             self._live_assistant = self._append("")
         self._live_text += text
         # Model text is data, not markup -- a stray "[/x]" must never raise.
-        self._live_assistant.update(f"●  {format.esc(self._live_text)}")
+        self._live_assistant.update(_bulleted(format.esc(self._live_text)))
+
+    def _close_text_block(self) -> None:
+        """Ends the CURRENT round's prose block by rendering it as Markdown in
+        place, so a `ToolStart`/`SubagentSpawned` between two rounds of text
+        never lets the second round's deltas keep appending onto the first
+        round's already-mounted widget (which is what put round-2 prose above
+        the tool calls that produced it, and ran its sentences together with
+        round 1's)."""
+        if self._live_assistant is None:
+            return
+        self._live_assistant.update(_bulleted(Markdown(self._live_text, code_theme="monokai")))
+        self._live_assistant = None
+        self._live_text = ""
 
     def finalize_turn(self, text: str) -> None:
         self._stop_status()
@@ -313,7 +372,7 @@ class Transcript(VerticalScroll):
         if self._live_assistant is None:
             self._ensure_gap("assistant")
             self._live_assistant = self._append("")
-        self._live_assistant.update(Markdown(f"●  {text}", code_theme="monokai"))
+        self._live_assistant.update(_bulleted(Markdown(text, code_theme="monokai")))
         self._live_assistant = None
         self._live_text = ""
 
@@ -335,15 +394,26 @@ class Transcript(VerticalScroll):
         w = self.size.width
         return max(10, w - 20) if w else None
 
-    def _outcome_line(self, outcome: str) -> str:
+    def _outcome_line(self, outcome: str, *, full: bool = False) -> str:
         is_error = outcome.startswith("→ error")
         sub = outcome[2:] if outcome.startswith("→ ") else outcome
+        if is_error and not full:
+            sub = _flatten_truncate(sub, _ERROR_ROW_CHARS)
         color = "red" if is_error else "dim"
         return f"  [{color}]└ {format.esc(sub)}[/{color}]"
+
+    def _mount_outcome(self, outcome: str) -> None:
+        if not outcome.startswith("→ error"):
+            self._append(self._outcome_line(outcome))
+            return
+        short = self._outcome_line(outcome)
+        full = self._outcome_line(outcome, full=True)
+        self._mount_widget(_ErrorLine(short, full))
 
     def add_tool_start(self, ev: events.ToolStart) -> None:
         if ev.name == "subagent":
             return
+        self._close_text_block()
         self._active_tool_count += 1
         self._refresh_status_now()
         key = ev.subagent_id
@@ -397,7 +467,7 @@ class Transcript(VerticalScroll):
             self._call_base[start_ev.call_id] = markup
             end_ev = self._buffered_end.pop(start_ev.call_id, None)
             if end_ev is not None and end_ev.outcome:
-                self._append(self._outcome_line(end_ev.outcome))
+                self._mount_outcome(end_ev.outcome)
         if group.more is not None:
             group.more.remove()
             group.more = None
@@ -418,9 +488,10 @@ class Transcript(VerticalScroll):
             return
         if not ev.outcome:
             return
-        self._append(self._outcome_line(ev.outcome))
+        self._mount_outcome(ev.outcome)
 
     def add_subagent_spawned(self, ev: events.SubagentSpawned) -> None:
+        self._close_text_block()
         self._active_subagents.add(ev.subagent_id)
         self._sub_task_text[ev.subagent_id] = ev.task_preview
         self._top_group = None

@@ -100,7 +100,7 @@ def test_compacted_escapes_stray_markup_in_note():
     assert "[missing]" in out
 
 
-def test_describe_outcome_error_strips_untrusted_wrapper_and_shows_200_chars():
+def test_describe_outcome_error_strips_untrusted_wrapper_and_keeps_full_text():
     text = ('error: <untrusted source="mcp:linear/save_project">\n'
            '{"error":"invalid_request","message":"' + "x" * 150 + '"}\n</untrusted>')
     outcome = format.describe_outcome("call_tool", text, 0.1, False, None, len(text))

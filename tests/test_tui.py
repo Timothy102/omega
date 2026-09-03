@@ -1,11 +1,14 @@
 import asyncio
+import io
 import json
 import time
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.syntax import Syntax
+from rich.table import Table
 from textual.widgets import Input, Static
 
 from omega import artifacts, compact, events, gitlog, loop, session
@@ -91,6 +94,10 @@ def make_app() -> tui.OmegaApp:
 
 
 def _texts(widget) -> list[str]:
+    # An assistant prose block now renders as a `Table.grid` (the "●" bullet
+    # column + a `Markdown` content column, for hanging-indent wrapping) --
+    # `str(Table(...))` is just a repr, so render it through a real Console to
+    # get back the text a person would actually see, same as the other branches.
     out = []
     for s in widget.query(Static):
         content = s.content
@@ -98,6 +105,10 @@ def _texts(widget) -> list[str]:
             out.append(content.markup)
         elif isinstance(content, Syntax):
             out.append(content.code)
+        elif isinstance(content, Table):
+            buf = io.StringIO()
+            Console(file=buf, width=200, force_terminal=False).print(content)
+            out.append(buf.getvalue())
         else:
             out.append(str(content))
     return out
@@ -316,7 +327,7 @@ async def test_plan_command_flips_mode_and_status_bar():
         assert app.mode == "plan"
         assert "plan" in str(app.query_one(StatusBar).content)
         assert prompt.has_class("-plan-mode")
-        assert prompt.placeholder == "❯ "
+        assert prompt.placeholder == "Ask omega… (shift+tab to change mode)"
         assert "plan" in str(app.query_one("#mode-tag", Static).content)
 
 
