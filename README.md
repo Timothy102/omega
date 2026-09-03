@@ -28,9 +28,18 @@ token — src/auth.py:88 raises Forbidden instead of Unauthorized.
   Their tools stay out of the prompt until the model searches for them —
   85 connected tools cost ~700 tokens instead of ~38,000.
 - **Subagents.** Delegate wide searches to a cheaper model and get back a
-  summary, so raw output never enters your main context.
+  summary, so raw output never enters your main context. Their tool activity
+  streams into your transcript as it happens; several run in parallel.
+- **Context that doesn't fill up.** Any tool result over 4k chars is written to
+  disk and the model sees a preview plus a `fetch_result` handle. Compaction
+  exists but rarely triggers.
+- **It can ask you things.** An `ask_user` tool blocks the turn on a real
+  question with arrow-key options, instead of guessing.
 - **Persistent memory.** A local knowledge graph (SQLite + FTS5), scoped per
   project and globally, with background consolidation.
+- **A terminal UI.** Bare `rig` opens a full-screen TUI: transcript, live
+  activity panel, status bar with token usage. `rig "prompt"` stays plain
+  text for scripts and pipes.
 
 ## Install
 
@@ -90,18 +99,35 @@ The file is written `0600`.
 ## Usage
 
 ```bash
-rig                              # interactive
-rig "fix the failing test"       # one-shot
+rig                              # interactive TUI
+rig "fix the failing test"       # one-shot, plain output
+echo "fix the failing test" | rig
 rig --plan "add rate limiting"   # read-only: investigate and plan
 rig --continue                   # resume this directory's last session
 rig --resume 20260828-174247     # resume by id (a prefix works)
 rig sessions                     # list sessions
+rig memory gc                    # consolidate memory now
 rig --mcp "list my Linear issues"
 rig --yolo "..."                 # skip permission prompts
 ```
 
-In the REPL: `/plan` and `/build` switch modes, ctrl-d exits, ctrl-c abandons
-the current turn without losing the session.
+In the TUI: `/plan` and `/build` switch modes, `/memory-gc` consolidates
+memory, `/quit` or ctrl-d exits, ctrl-c abandons the current turn without
+losing the session, up/down walk input history. Permission prompts and
+`ask_user` questions open as modals — arrow keys and enter, or type a
+free-text answer.
+
+## Context and artifacts
+
+Every tool result is checked at dispatch: anything over 4,000 characters is
+written to `~/.rig/sessions/<id>/artifacts/` and replaced in the
+conversation with a head+tail preview and an id. The model calls
+`fetch_result(id, offset, limit)` to page through the rest — so a huge test
+log or `cat` costs a few hundred tokens of context, not thirty thousand.
+
+The same store backs `save_artifact` / `update_artifact`, which let the model
+build up a plan or report across a turn without re-emitting it each time, and
+`list_artifacts` to see what's there.
 
 ## Permissions
 
@@ -167,12 +193,14 @@ close once 5+ new nodes have accumulated, or on demand with `rig memory gc`
 
 ## Development
 
-Uses [uv](https://docs.astral.sh/uv/) and [ruff](https://docs.astral.sh/ruff/).
+Uses [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/),
+and [mypy](https://mypy-lang.org/) in strict mode.
 
 ```bash
 uv sync            # creates .venv with dev deps
 uv run pytest
 uv run ruff check
+uv run mypy
 ```
 
 ## Where things live
@@ -193,8 +221,10 @@ They're local, but treat them as sensitive.
 ## Status
 
 Early. It works and it's tested, but expect rough edges. Known gaps: sessions
-rewrite the whole file each turn (fine for now, will become append-only), and
-compaction replaces old messages rather than archiving them.
+rewrite the whole file each turn (fine for now, will become append-only);
+compaction, when it does trigger, replaces old messages rather than archiving
+them; artifacts and sessions are never garbage-collected; and the TUI has
+been exercised on macOS terminals only.
 
 ## Licence
 

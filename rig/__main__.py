@@ -2,13 +2,14 @@ import asyncio
 import sys
 
 from . import config, mcp, session, subagent, tools
+from .config import Config
 from .memory import consolidate
 from .ui import plain
 
 console = plain.console
 
 
-async def main():
+async def main() -> None:
     argv = sys.argv[1:]
     # Dispatch subcommands BEFORE config.load(): it exits when no API key is
     # set, which made `rig setup` -- the flow that sets the key -- unreachable.
@@ -110,37 +111,40 @@ async def main():
     if resumed_note:
         console.print(f"[dim]{resumed_note}[/dim]")
 
+    # No prompt on argv and stdin isn't a terminal: read it from there, so
+    # `echo "fix the tests" | rig` works instead of only piping into a REPL
+    # that no longer exists for this invocation.
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+
     if prompt:
         await plain.run_prompt(cfg, history, prompt, mode, sess)
         await _consolidate_on_close(cfg)
         return
 
-    # No prompt and not an interactive terminal (e.g. piped stdin with nothing
-    # on argv): there is no REPL to fall back to anymore, and nothing to run.
     console.print("[dim]rig: no prompt given and not an interactive terminal[/dim]")
 
 
-async def _consolidate_on_close(cfg, report=None):
+async def _consolidate_on_close(cfg: Config) -> None:
     # A provider error here must never block exit -- consolidation is a
     # courtesy, not a precondition for closing the session.
-    report = report or (lambda summary: console.print(f"[dim]{summary}[/dim]"))
     try:
         for scope in ("project", "global"):
             summary = await consolidate.run(cfg, scope, force=False)
             if summary:
-                report(summary)
+                console.print(f"[dim]{summary}[/dim]")
     except Exception:
         pass
 
 
-async def _main_guarded():
+async def _main_guarded() -> None:
     try:
         await main()
     finally:
         await mcp.shutdown()
 
 
-def cli():
+def cli() -> None:
     try:
         asyncio.run(_main_guarded())
     except KeyboardInterrupt:

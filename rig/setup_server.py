@@ -4,30 +4,34 @@ import re
 import secrets
 import threading
 import webbrowser
+from collections.abc import Callable
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from typing import Any
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 import httpx
 
 from . import config, events, mcp
 
+Body = dict[str, Any]
+
 UI = Path(__file__).parent / "setup.html"
 TOKEN = secrets.token_urlsafe(16)
 
 
-def _cfg() -> dict:
+def _cfg() -> Body:
     p = config.CONFIG_PATH
     if p.exists():
-        return json.loads(config._strip_jsonc(p.read_text()))
+        return dict(json.loads(config._strip_jsonc(p.read_text())))
     return config.DEFAULTS
 
 
 ALLOWED_TOP = {"providers", "roles", "mcp"}
 
 
-def _validate(data: dict) -> dict:
+def _validate(data: Body) -> Body:
     if not isinstance(data, dict):
         raise ValueError("config must be an object")
     unknown = set(data) - ALLOWED_TOP
@@ -40,7 +44,7 @@ def _validate(data: dict) -> dict:
     return data
 
 
-def _save(data: dict) -> dict:
+def _save(data: Body) -> Body:
     _validate(data)
     p = config.CONFIG_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -49,7 +53,7 @@ def _save(data: dict) -> dict:
     return {"ok": True, "path": str(p)}
 
 
-def _provider(body) -> tuple:
+def _provider(body: Body) -> tuple[str, str]:
     cfg = _cfg()
     name = body.get("provider") or next(iter(cfg["providers"]))
     p = cfg["providers"][name]
@@ -60,7 +64,7 @@ def _provider(body) -> tuple:
     return p["baseUrl"].rstrip("/"), key
 
 
-def api_models(body) -> dict:
+def api_models(body: Body) -> Body:
     base, key = _provider(body)
     if not key:
         return {"error": "no API key set"}
@@ -70,7 +74,7 @@ def api_models(body) -> dict:
     return {"models": sorted(m["id"] for m in r.json().get("data", []))}
 
 
-def api_test_model(body) -> dict:
+def api_test_model(body: Body) -> Body:
     import time
     base, key = _provider(body)
     model = body["model"]
@@ -93,7 +97,7 @@ def api_test_model(body) -> dict:
     return {"model": model, "ok": True, "ms": round(dt)}
 
 
-def api_mcp_discover(body) -> dict:
+def api_mcp_discover(body: Body) -> Body:
     out = []
     for name, cfg in mcp.discover().items():
         out.append({"name": name, "stdio": "command" in cfg,
@@ -101,9 +105,9 @@ def api_mcp_discover(body) -> dict:
     return {"servers": sorted(out, key=lambda s: (not s["stdio"], s["name"]))}
 
 
-def api_mcp_test(body) -> dict:
+def api_mcp_test(body: Body) -> Body:
     name, spec = body["name"], body["config"]
-    async def go():
+    async def go() -> Body:
         s = mcp.Server(name, spec)
         try:
             await s.start(timeout=120)
@@ -120,7 +124,7 @@ BENCH_CANDIDATES = ["glm-5.3-flash", "kimi-k3", "gemini-2.5-flash-lite",
                     "deepseek-v4-flash", "kimi-k3-fast"]
 
 
-def api_benchmark(body) -> dict:
+def api_benchmark(body: Body) -> Body:
     """Measure time-to-first-token and tool-calling for candidate models."""
     import time
     base, key = _provider(body)
@@ -129,7 +133,7 @@ def api_benchmark(body) -> dict:
     if catalog:
         models = [m for m in models if m in catalog]
 
-    async def one(client, model):
+    async def one(client: httpx.AsyncClient, model: str) -> Body:
         t0 = time.perf_counter()
         try:
             r = await client.post(f"{base}/chat/completions",
@@ -147,7 +151,7 @@ def api_benchmark(body) -> dict:
         except Exception as e:
             return {"model": model, "ok": False, "error": type(e).__name__}
 
-    async def go():
+    async def go() -> list[Body]:
         # Sequential on purpose: concurrent requests contend and scramble the
         # ranking, which is the one thing this measurement exists to produce.
         async with httpx.AsyncClient() as c:
@@ -162,16 +166,16 @@ PROBE_PROMPT = ("Run 'pwd' and 'date' with bash, then say in one short "
                 "sentence where you are and what day it is.")
 
 
-def api_agent(body) -> dict:
+def api_agent(body: Body) -> Body:
     """Run one real rig turn so onboarding ends on proof it works."""
     from . import loop
-    calls: list = []
-    def emit(ev):
+    calls: list[str] = []
+    def emit(ev: events.Event) -> None:
         if isinstance(ev, events.ToolStart):
             calls.append(ev.name)
-    async def go():
+    async def go() -> str:
         cfg = config.load()
-        history = [{"role": "user", "content": PROBE_PROMPT}]
+        history: list[Body] = [{"role": "user", "content": PROBE_PROMPT}]
         text = await loop.run_agent(cfg, "main",
                                     loop.BUILD_SYSTEM, history,
                                     emit=emit)
@@ -182,7 +186,7 @@ def api_agent(body) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"[:250]}
 
 
-def _redacted_cfg(_b=None) -> dict:
+def _redacted_cfg(_b: Body | None = None) -> Body:
     import copy
     c = copy.deepcopy(_cfg())
     for prov in (c.get("providers") or {}).values():
@@ -193,7 +197,7 @@ def _redacted_cfg(_b=None) -> dict:
     return c
 
 
-ROUTES = {
+ROUTES: dict[str, Callable[[Body], Body]] = {
     "/api/config": _redacted_cfg,
     "/api/save": _save,
     "/api/models": api_models,
@@ -206,10 +210,10 @@ ROUTES = {
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *a):
+    def log_message(self, *a: Any) -> None:
         pass
 
-    def _authed(self, url) -> bool:
+    def _authed(self, url: ParseResult) -> bool:
         supplied = (self.headers.get("X-Rig-Token")
                     or parse_qs(url.query).get("t", [""])[0])
         return secrets.compare_digest(supplied, TOKEN)
@@ -228,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code: int, body: bytes | Body, ctype: str = "application/json") -> None:
         raw = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -236,7 +240,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         url = urlparse(self.path)
         if not self._same_origin():
             return self._send(403, {"error": "bad origin"})
@@ -250,7 +254,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(405, {"error": "use POST"})
         self._send(404, {"error": "not found"})
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         url = urlparse(self.path)
         if not self._same_origin():
             return self._send(403, {"error": "bad origin"})
@@ -267,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"error": f"{type(e).__name__}: {e}"[:300]})
 
 
-def serve(port=0, open_browser=True):
+def serve(port: int = 0, open_browser: bool = True) -> None:
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/?t={TOKEN}"

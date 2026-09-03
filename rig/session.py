@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+Message = dict[str, Any]
+
 DIR = Path.home() / ".rig" / "sessions"
 
 # Shared with __main__'s resumed-session marker so UIs can identify and
@@ -20,11 +22,11 @@ class Session:
     mode: str = "build"
     created: float = 0.0
     updated: float = 0.0
-    history: list = field(default_factory=list)
+    history: list[Message] = field(default_factory=list)
     compactions: int = 0
 
     @classmethod
-    def new(cls, cwd=None, mode="build"):
+    def new(cls, cwd: str | None = None, mode: str = "build") -> "Session":
         now = time.time()
         sid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
         return cls(id=sid, cwd=cwd or os.getcwd(), mode=mode, created=now, updated=now)
@@ -37,14 +39,14 @@ class Session:
     def turns(self) -> int:
         return sum(1 for m in self.history if m.get("role") == "user")
 
-    def first_prompt(self, width=70) -> str:
+    def first_prompt(self, width: int = 70) -> str:
         for m in self.history:
             if m.get("role") == "user":
                 text = " ".join((m.get("content") or "").split())
                 return text[:width - 1] + "…" if len(text) > width else text
         return "(empty)"
 
-    def save(self):
+    def save(self) -> None:
         DIR.mkdir(parents=True, exist_ok=True)
         self.updated = time.time()
         tmp = self.path.with_suffix(".tmp")
@@ -70,13 +72,13 @@ def load(sid: str) -> Session:
             raise SystemExit(f"rig: no session {sid!r}")
         p = matches[-1]
     raw = json.loads(p.read_text())
-    known = {f for f in Session.__dataclass_fields__}
+    known = set(Session.__dataclass_fields__)
     sess = Session(**{k: v for k, v in raw.items() if k in known})
     repair(sess.history)
     return sess
 
 
-def repair(history: list) -> list:
+def repair(history: list[Message]) -> list[Message]:
     """Drop a trailing assistant message whose tool_calls were never answered.
     Providers hard-400 on that shape, which would brick the session forever."""
     while history:
@@ -90,7 +92,7 @@ def repair(history: list) -> list:
     return history
 
 
-def all_sessions() -> list:
+def all_sessions() -> list[Session]:
     if not DIR.exists():
         return []
     out = []
@@ -102,7 +104,7 @@ def all_sessions() -> list:
     return sorted(out, key=lambda s: s.updated, reverse=True)
 
 
-def latest(cwd=None) -> Session | None:
+def latest(cwd: str | None = None) -> Session | None:
     cwd = cwd or os.getcwd()
     # Never fall back to another directory's session: bash and relative paths
     # resolve against the real cwd, so the model would edit the wrong project.
@@ -110,7 +112,7 @@ def latest(cwd=None) -> Session | None:
     return here[0] if here else None
 
 
-def render_list(limit=20) -> str:
+def render_list(limit: int = 20) -> str:
     """One session per line: wrapped rows make the list unparseable."""
     rows = all_sessions()[:limit]
     if not rows:

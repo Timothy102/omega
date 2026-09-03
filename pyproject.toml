@@ -48,10 +48,4 @@ ignore = ["E401", "E741"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["rig/ui", "rig/events.py"]
-
-# plain.py predates strict typing and isn't being rewritten here; only the new
-# tui/ package and events.py are held to --strict.
-[[tool.mypy.overrides]]
-module = "rig.ui.plain"
-ignore_errors = true
+files = ["rig"]

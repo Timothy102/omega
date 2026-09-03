@@ -3,6 +3,7 @@ import os
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
 STORE = Path.home() / ".rig" / "permissions.json"
 
@@ -33,16 +34,16 @@ SAFE_GIT = {"status", "diff", "log", "show", "branch", "remote", "rev-parse", "s
 SHELL_META = re.compile(r"[>|]|\$\(|`|&&|;|\|\|")
 
 
-def _load() -> dict:
+def _load() -> dict[str, list[str]]:
     if STORE.exists():
         try:
-            return json.loads(STORE.read_text())
+            return dict(json.loads(STORE.read_text()))
         except json.JSONDecodeError:
             pass
     return {"allow": [], "deny": []}
 
 
-def remember(rule: str, verdict: str):
+def remember(rule: str, verdict: str) -> None:
     data = _load()
     key = "allow" if verdict == ALLOW else "deny"
     if rule not in data[key]:
@@ -52,7 +53,7 @@ def remember(rule: str, verdict: str):
     STORE.chmod(0o600)
 
 
-def rule_for(name: str, args: dict) -> str:
+def rule_for(name: str, args: dict[str, Any]) -> str:
     if name == "bash":
         return f"bash:{_first_token(args.get('command', ''))}"
     if name == "call_tool":
@@ -81,7 +82,8 @@ def _touches_forbidden(text: str) -> str | None:
     return None
 
 
-def decide(name: str, args: dict, cwd: str | None = None, tainted=False) -> tuple:
+def decide(name: str, args: dict[str, Any], cwd: str | None = None,
+          tainted: bool = False) -> tuple[str, str]:
     """Returns (verdict, reason). Pure -- no I/O beyond the rules file."""
     cwd = cwd or os.getcwd()
     stored = _load()

@@ -2,10 +2,13 @@ import json
 import secrets
 import time
 from pathlib import Path
+from typing import Any
 
 from .tools import truncate
 
 DIR = Path.home() / ".rig" / "sessions"
+
+Meta = dict[str, Any]
 
 
 def _session_dir(session_id: str) -> Path:
@@ -17,7 +20,7 @@ def _paths(session_id: str, artifact_id: str) -> tuple[Path, Path]:
     return d / f"{artifact_id}.txt", d / f"{artifact_id}.meta.json"
 
 
-def _write_meta(meta_path: Path, meta: dict):
+def _write_meta(meta_path: Path, meta: Meta) -> None:
     tmp = meta_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(meta, indent=1))
     tmp.replace(meta_path)
@@ -48,7 +51,7 @@ def fetch(session_id: str, artifact_id: str, offset: int = 0, limit: int = 4000)
     return content[offset:offset + limit]
 
 
-def update(session_id: str, artifact_id: str, content: str):
+def update(session_id: str, artifact_id: str, content: str) -> str:
     text_path, meta_path = _paths(session_id, artifact_id)
     if not meta_path.exists():
         return f"error: no artifact {artifact_id!r} in session {session_id!r}"
@@ -60,11 +63,11 @@ def update(session_id: str, artifact_id: str, content: str):
     return f"updated artifact {artifact_id}"
 
 
-def list_artifacts(session_id: str) -> list[dict]:
+def list_artifacts(session_id: str) -> list[Meta]:
     d = _session_dir(session_id)
     if not d.exists():
         return []
-    out = []
+    out: list[Meta] = []
     for meta_path in sorted(d.glob("*.meta.json")):
         artifact_id = meta_path.name.removesuffix(".meta.json")
         try:

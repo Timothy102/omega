@@ -1,8 +1,12 @@
 import json
 import re
+from typing import Any, cast
 
 from .. import llm
+from ..config import Config
+from ..llm import Turn
 from . import store
+from .store import Node
 
 SYSTEM = """You maintain a personal knowledge graph for a coding agent. Given a
 list of memory nodes, find near-duplicates to merge, direct contradictions, and
@@ -17,7 +21,7 @@ merge.keep/drop must be ids taken from the input. retag entries may omit
 either field. Return empty lists where nothing applies."""
 
 
-def _render(nodes: list) -> str:
+def _render(nodes: list[Node]) -> str:
     return "\n\n".join(
         f"[{n['id']}] type={n['type']} confidence={n['confidence']} "
         f"volatility={n['volatility']} importance={n['importance']}\n"
@@ -25,12 +29,12 @@ def _render(nodes: list) -> str:
         for n in nodes)
 
 
-def _parse(text: str) -> dict:
+def _parse(text: str) -> dict[str, Any]:
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    return json.loads(text)
+    return dict(json.loads(text))
 
 
-async def run(cfg, scope: str, min_new: int = 5, force: bool = False) -> str:
+async def run(cfg: Config, scope: str, min_new: int = 5, force: bool = False) -> str:
     if not force and store.since_consolidation(scope) < min_new:
         return ""
 
@@ -45,7 +49,7 @@ async def run(cfg, scope: str, min_new: int = 5, force: bool = False) -> str:
             role, [{"role": "system", "content": SYSTEM},
                    {"role": "user", "content": _render(nodes)}]):
         if kind == "done":
-            text = payload.text
+            text = cast(Turn, payload).text
 
     try:
         data = _parse(text)
@@ -79,7 +83,7 @@ async def run(cfg, scope: str, min_new: int = 5, force: bool = False) -> str:
         node_id = r.get("id")
         if node_id not in by_id:
             continue
-        fields = {}
+        fields: dict[str, str | float] = {}
         if r.get("volatility") in store.VOLATILITIES:
             fields["volatility"] = r["volatility"]
         if "importance" in r:
@@ -88,7 +92,8 @@ async def run(cfg, scope: str, min_new: int = 5, force: bool = False) -> str:
             except (TypeError, ValueError):
                 pass
         if fields:
-            store.retag(scope, node_id, **fields)
+            store.retag(scope, node_id, volatility=fields.get("volatility"),
+                       importance=fields.get("importance"))
             retagged += 1
 
     store.reset_consolidation(scope)

@@ -1,10 +1,13 @@
 import secrets
+from collections.abc import Callable
 
 from . import events, tools
+from .config import Config
+from .session import Message
 
-CFG = None
+CFG: Config | None = None
 # Set by run_turn at the start of every turn, mirroring tools.set_tainted(False).
-EMIT = None
+EMIT: Callable[[events.Event], None] | None = None
 
 TIERS = {"fast": "subagent_fast", "mid": "subagent_mid"}
 
@@ -27,7 +30,7 @@ dense and short: no preamble, no restating the task, no offers to help further."
      "tier": {"type": "string", "enum": ["fast", "mid"]}},
     ["task"],
 )
-async def _subagent(task, tier="fast"):
+async def _subagent(task: str, tier: str = "fast") -> str:
     from .loop import run_agent
     if CFG is None:
         return "error: subagent not wired"
@@ -35,7 +38,7 @@ async def _subagent(task, tier="fast"):
     subagent_id = secrets.token_hex(3)
     emit = EMIT or (lambda _e: None)
 
-    def forward(ev):
+    def forward(ev: events.Event) -> None:
         # The subagent's prose is its return value, not transcript text --
         # only its tool activity is visible upward.
         if not isinstance(ev, events.TextDelta | events.Done):
@@ -43,7 +46,7 @@ async def _subagent(task, tier="fast"):
 
     emit(events.SubagentSpawned(subagent_id=subagent_id, tier=tier,
                                 task_preview=" ".join(task.split())[:80]))
-    history = [{"role": "user", "content": task}]
+    history: list[Message] = [{"role": "user", "content": task}]
     result = await run_agent(CFG, role, SYSTEM, history,
                              tools.READ_ONLY - {"subagent"}, emit=forward,
                              max_rounds=12, subagent_id=subagent_id, tier=tier)

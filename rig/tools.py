@@ -7,17 +7,35 @@ import signal
 import subprocess
 import time
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from . import permissions
+from .events import Option
+from .llm import ToolCall
+
+ToolArgs = dict[str, Any]
+ToolFn = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class ToolEntry:
+    fn: ToolFn
+    locks_path: str | None
+    mutates: bool
+    deferred: bool
+    schema: dict[str, Any]
+
 
 MAX_OUTPUT = 30000
-REGISTRY: dict = {}
-_locks: dict = defaultdict(asyncio.Lock)
+REGISTRY: dict[str, ToolEntry] = {}
+_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _OFFLOAD_RE = re.compile(r"saved as artifact ([0-9a-f]{8})")
 
 # Set by the CLI. None means no prompting (scripted / --yolo).
-CONFIRM = None
+CONFIRM: Callable[[str, ToolArgs, str], Awaitable[bool]] | None = None
 _confirm_lock = asyncio.Lock()
 TAINTED = False
 
@@ -26,10 +44,10 @@ TAINTED = False
 SESSION_ID: str | None = None
 
 # Set by the CLI. None means no interactive session (scripted / --yolo).
-ASK_USER = None
+ASK_USER: Callable[[str, list[Option], bool], Awaitable[str]] | None = None
 
 
-def set_tainted(value: bool):
+def set_tainted(value: bool) -> None:
     global TAINTED
     TAINTED = value
 
@@ -50,15 +68,13 @@ def truncate(text: str, limit: int = MAX_OUTPUT) -> str:
             f"... [truncated {dropped} chars from the middle] ...\n{text[-tail:]}")
 
 
-def tool(name, description, params, required, locks_path=None, mutates=False,
-         deferred=False):
-    def wrap(fn):
-        REGISTRY[name] = {
-            "fn": fn,
-            "locks_path": locks_path,
-            "mutates": mutates,
-            "deferred": deferred,
-            "schema": {
+def tool(name: str, description: str, params: dict[str, Any], required: list[str],
+        locks_path: str | None = None, mutates: bool = False,
+        deferred: bool = False) -> Callable[[ToolFn], ToolFn]:
+    def wrap(fn: ToolFn) -> ToolFn:
+        REGISTRY[name] = ToolEntry(
+            fn=fn, locks_path=locks_path, mutates=mutates, deferred=deferred,
+            schema={
                 "type": "function",
                 "function": {
                     "name": name,
@@ -67,7 +83,7 @@ def tool(name, description, params, required, locks_path=None, mutates=False,
                                    "required": required},
                 },
             },
-        }
+        )
         return fn
     return wrap
 
@@ -81,17 +97,16 @@ _NO_OFFLOAD = {"write", "edit", "remember", "supersede", "link", "ask_user",
                "save_artifact", "update_artifact", "fetch_result", "list_artifacts"}
 
 
-def schemas(names=None) -> list:
+def schemas(names: set[str] | None = None) -> list[dict[str, Any]]:
     """Deferred tools stay out of the prefix: they are reachable via
     find_tools/call_tool instead of costing tokens on every request."""
     if names is None:
-        return [t["schema"] for n, t in REGISTRY.items() if not t.get("deferred")]
-    return [t["schema"] for n, t in REGISTRY.items()
-            if n in names and not t.get("deferred")]
+        return [t.schema for t in REGISTRY.values() if not t.deferred]
+    return [t.schema for n, t in REGISTRY.items() if n in names and not t.deferred]
 
 
-def deferred() -> dict:
-    return {n: t for n, t in REGISTRY.items() if t.get("deferred")}
+def deferred() -> dict[str, ToolEntry]:
+    return {n: t for n, t in REGISTRY.items() if t.deferred}
 
 
 S = {"type": "string"}
@@ -100,7 +115,7 @@ I = {"type": "integer"}
 
 @tool("read", "Read a file. Returns numbered lines.",
       {"path": S, "offset": I, "limit": I}, ["path"])
-def _read(path, offset=0, limit=2000):
+def _read(path: str, offset: int = 0, limit: int = 2000) -> str:
     p = Path(path).expanduser()
     try:
         p.resolve().relative_to(Path(os.getcwd()).resolve())
@@ -115,7 +130,7 @@ def _read(path, offset=0, limit=2000):
 
 @tool("write", "Write a file, creating parent directories.",
       {"path": S, "content": S}, ["path", "content"], locks_path="path", mutates=True)
-def _write(path, content):
+def _write(path: str, content: str) -> str:
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
@@ -124,7 +139,7 @@ def _write(path, content):
 
 @tool("edit", "Replace an exact unique string in a file.",
       {"path": S, "old": S, "new": S}, ["path", "old", "new"], locks_path="path", mutates=True)
-def _edit(path, old, new):
+def _edit(path: str, old: str, new: str) -> str:
     p = Path(path).expanduser()
     text = p.read_text()
     n = text.count(old)
@@ -138,7 +153,7 @@ def _edit(path, old, new):
 
 @tool("bash", "Run a shell command. Returns combined stdout+stderr.",
       {"command": S, "timeout": I}, ["command"], mutates=True)
-def _bash(command, timeout=120):
+def _bash(command: str, timeout: int | None = 120) -> str:
     # start_new_session puts the child in its own process group, so a timeout
     # can kill the whole tree; subprocess.run would only kill the shell and
     # leave its children running forever.
@@ -162,7 +177,7 @@ def _bash(command, timeout=120):
                 pass
         return truncate(f"(timed out after {timeout}s; process group killed)")
 
-    parts = []
+    parts: list[str] = []
     if (stdout or "").strip():
         parts.append(truncate(stdout.strip(), int(MAX_OUTPUT * 0.75)))
     if (stderr or "").strip():
@@ -173,7 +188,7 @@ def _bash(command, timeout=120):
     return "\n".join(parts) or "(no output, exit 0)"
 
 
-def _kill_group(pgid):
+def _kill_group(pgid: int) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
@@ -189,7 +204,7 @@ def _kill_group(pgid):
 
 @tool("grep", "Search file contents by regex. Returns path:line:text.",
       {"pattern": S, "path": S, "glob": S}, ["pattern"])
-def _grep(pattern, path=".", glob="*"):
+def _grep(pattern: str, path: str = ".", glob: str = "*") -> str:
     if not _shutil.which("rg"):
         raise RuntimeError("ripgrep (rg) not installed; use bash with grep instead")
     cmd = ["rg", "--line-number", "--no-heading", "--color=never",
@@ -202,7 +217,7 @@ def _grep(pattern, path=".", glob="*"):
 
 @tool("glob", "Find files by name pattern, newest first.",
       {"pattern": S, "path": S}, ["pattern"])
-def _glob(pattern, path="."):
+def _glob(pattern: str, path: str = ".") -> str:
     root = Path(path).expanduser()
     # pathlib.glob understands "**" as spanning directories; fnmatch does not.
     matches = root.glob(pattern) if "/" in pattern else root.rglob(pattern)
@@ -212,7 +227,7 @@ def _glob(pattern, path="."):
     return truncate("\n".join(str(p) for p in hits[:200]) or "(no matches)")
 
 
-async def run(call, allowed=None) -> str:
+async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
     """`allowed` is enforced here, not merely omitted from the schema list.
     Filtering schemas only hides a tool; a model can still emit the call."""
     if allowed is not None and call.name not in allowed:
@@ -238,10 +253,10 @@ async def run(call, allowed=None) -> str:
                 ok = await CONFIRM(call.name, args, why)
             if not ok:
                 return "error: denied by user"
-        fn = entry["fn"]
+        fn = entry.fn
         call_it = ((lambda: fn(**args)) if inspect.iscoroutinefunction(fn)
                    else (lambda: asyncio.to_thread(fn, **args)))
-        lock_key = args.get(entry["locks_path"]) if entry["locks_path"] else None
+        lock_key = args.get(entry.locks_path) if entry.locks_path else None
         if lock_key:
             async with _locks[str(Path(lock_key).expanduser().resolve())]:
                 result = await call_it()
@@ -250,6 +265,7 @@ async def run(call, allowed=None) -> str:
     except Exception as e:
         return f"error: {type(e).__name__}: {e}"
 
+    result = cast(str, result)
     if call.name in _NO_OFFLOAD or SESSION_ID is None:
         return result
     from . import artifacts
@@ -262,11 +278,11 @@ async def run(call, allowed=None) -> str:
       "Use this BEFORE call_tool when you need an integration, then pass the "
       "exact name to call_tool.",
       {"query": S, "limit": I}, ["query"])
-def _find_tools(query, limit=8):
+def _find_tools(query: str, limit: int = 8) -> str:
     terms = [w for w in query.lower().split() if len(w) > 2]
-    scored = []
+    scored: list[tuple[int, str, dict[str, Any]]] = []
     for name, entry in deferred().items():
-        fn = entry["schema"]["function"]
+        fn = entry.schema["function"]
         hay = (name + " " + (fn.get("description") or "")).lower()
         score = sum(hay.count(w) for w in terms)
         if score:
@@ -290,16 +306,16 @@ def _find_tools(query, limit=8):
       "Invoke a tool found via find_tools. `name` must be an exact name from "
       "find_tools output; `arguments` is a JSON object of its parameters.",
       {"name": S, "arguments": {"type": "object"}}, ["name"], mutates=True)
-async def _call_tool(name, arguments=None):
+async def _call_tool(name: str, arguments: ToolArgs | None = None) -> str:
     entry = REGISTRY.get(name)
-    if entry is None or not entry.get("deferred"):
+    if entry is None or not entry.deferred:
         return (f"error: {name!r} is not a deferred tool. "
                 f"Use find_tools first to get an exact name.")
-    fn = entry["fn"]
+    fn = entry.fn
     args = arguments or {}
     if inspect.iscoroutinefunction(fn):
-        return await fn(**args)
-    return await asyncio.to_thread(fn, **args)
+        return cast(str, await fn(**args))
+    return cast(str, await asyncio.to_thread(fn, **args))
 
 
 @tool("ask_user",
@@ -311,7 +327,8 @@ async def _call_tool(name, arguments=None):
                     "properties": {"label": S, "description": S}}},
        "multi_select": {"type": "boolean"}},
       ["question"])
-async def _ask_user(question, header="", options=None, multi_select=False):
+async def _ask_user(question: str, header: str = "", options: list[Option] | None = None,
+                    multi_select: bool = False) -> str:
     if ASK_USER is None:
         return ("error: ask_user requires an interactive session; rig is "
                 "running non-interactively. State your assumption and "
@@ -324,7 +341,7 @@ async def _ask_user(question, header="", options=None, multi_select=False):
       "Read more of a large tool result that was saved as an artifact -- "
       "the id is in the `[full output: ... saved as artifact <id>]` footer.",
       {"id": S, "offset": I, "limit": I}, ["id"])
-def _fetch_result(id, offset=0, limit=4000):
+def _fetch_result(id: str, offset: int = 0, limit: int = 4000) -> str:
     if SESSION_ID is None:
         return "error: no active session"
     from . import artifacts
@@ -335,7 +352,7 @@ def _fetch_result(id, offset=0, limit=4000):
       "List the artifacts saved so far this session (offloaded tool "
       "outputs and content saved with save_artifact) -- id, kind, size, title.",
       {}, [])
-def _list_artifacts():
+def _list_artifacts() -> str:
     if SESSION_ID is None:
         return "(no artifacts this session)"
     from . import artifacts
@@ -351,7 +368,7 @@ def _list_artifacts():
       "you don't have to re-emit it every turn; returns an id you can update "
       "later.",
       {"title": S, "content": S}, ["title", "content"], mutates=True)
-def _save_artifact(title, content):
+def _save_artifact(title: str, content: str) -> str:
     if SESSION_ID is None:
         return "error: no active session"
     from . import artifacts
@@ -363,7 +380,7 @@ def _save_artifact(title, content):
       "Replace the full content of an artifact you previously created with "
       "save_artifact (full replace, no diffing).",
       {"id": S, "content": S}, ["id", "content"], mutates=True)
-def _update_artifact(id, content):
+def _update_artifact(id: str, content: str) -> str:
     if SESSION_ID is None:
         return "error: no active session"
     from . import artifacts

@@ -3,10 +3,11 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 CONFIG_PATH = Path(os.environ.get("RIG_CONFIG", Path.home() / ".rig" / "config.json"))
 
-DEFAULTS = {
+DEFAULTS: dict[str, Any] = {
     "providers": {
         "inference-net": {
             "baseUrl": "https://api.inference.net/v1",
@@ -40,7 +41,7 @@ class Role:
 
 @dataclass
 class Config:
-    roles: dict = field(default_factory=dict)
+    roles: dict[str, Role] = field(default_factory=dict)
 
     def role(self, name: str) -> Role:
         if name not in self.roles:
@@ -54,11 +55,11 @@ def _strip_jsonc(text: str) -> str:
 
 
 def load() -> Config:
-    raw = DEFAULTS
+    raw: dict[str, Any] = DEFAULTS
     if CONFIG_PATH.exists():
         raw = json.loads(_strip_jsonc(CONFIG_PATH.read_text()))
 
-    providers = {}
+    providers: dict[str, Provider] = {}
     for name, p in raw["providers"].items():
         key = p.get("apiKey") or os.environ.get(p.get("apiKeyEnv", ""), "")
         if not key:
@@ -69,13 +70,13 @@ def load() -> Config:
                 f"  Run `rig setup` to configure one, or {hint}")
         providers[name] = Provider(name, p["baseUrl"].rstrip("/"), key)
 
-    roles = {}
+    roles: dict[str, Role] = {}
     for name, r in raw["roles"].items():
         roles[name] = Role(r["model"], providers[r["provider"]], r.get("context", 128000))
     return Config(roles)
 
 
-def mcp_names() -> list:
+def mcp_names() -> list[str]:
     if not CONFIG_PATH.exists():
         return []
     import json as _json

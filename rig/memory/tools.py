@@ -2,6 +2,7 @@ import re
 
 from .. import tools
 from . import store
+from .store import Node
 
 S = {"type": "string"}
 I = {"type": "integer"}
@@ -28,7 +29,7 @@ SENSITIVE_PATTERNS = [
 ]
 
 
-def _scan_sensitive(*texts) -> list:
+def _scan_sensitive(*texts: str) -> list[str]:
     blob = "\n".join(texts)
     reasons = []
     for pattern, reason in SENSITIVE_PATTERNS:
@@ -37,7 +38,7 @@ def _scan_sensitive(*texts) -> list:
     return reasons
 
 
-def _resolve(id_or_title):
+def _resolve(id_or_title: str) -> tuple[str, Node] | tuple[None, None]:
     """Look up a node across both scopes, project first. Never triggers the
     project db's .gitignore bootstrap by probing a db that doesn't exist yet."""
     for scope in ("project", "global"):
@@ -63,9 +64,9 @@ def _resolve(id_or_title):
      "volatility": S, "sensitivity": S, "importance": F,
      "relates_to": {"type": "array", "items": S}},
     ["title", "body"], mutates=True)
-def _remember(title, body, type="fact", scope="project", confidence=0.8,
-              volatility="stable", sensitivity="normal", importance=0.5,
-              relates_to=None):
+def _remember(title: str, body: str, type: str = "fact", scope: str = "project",
+             confidence: float = 0.8, volatility: str = "stable", sensitivity: str = "normal",
+             importance: float = 0.5, relates_to: list[str] | None = None) -> str:
     reasons = _scan_sensitive(title, body)
     if reasons:
         sensitivity = "sensitive"
@@ -76,7 +77,7 @@ def _remember(title, body, type="fact", scope="project", confidence=0.8,
     except ValueError as e:
         return f"error: {e}"
 
-    unresolved = []
+    unresolved: list[str] = []
     for ref in relates_to or []:
         target = store.get(scope, ref)
         if target is None:
@@ -100,12 +101,12 @@ def _remember(title, body, type="fact", scope="project", confidence=0.8,
     "including a resumed one, is already in your context above. Do not call "
     "this to answer questions about what was just discussed.",
     {"query": S, "scope": S, "type": S, "depth": I}, ["query"])
-def _recall(query, scope="both", type=None, depth=1):
+def _recall(query: str, scope: str = "both", type: str | None = None, depth: int = 1) -> str:
     if scope not in ("both", "project", "global"):
         return f"error: invalid scope {scope!r}; expected 'both', 'project' or 'global'"
     scopes = ["project", "global"] if scope == "both" else [scope]
 
-    blocks = []
+    blocks: list[str] = []
     for sc in scopes:
         if sc == "project" and not store.db_exists("project"):
             continue
@@ -133,9 +134,9 @@ def _recall(query, scope="both", type=None, depth=1):
     "Replace an outdated memory node with a corrected one. The old node stops "
     "appearing in recall/preamble by default but stays queryable by id.",
     {"old": S, "new_body": S, "confidence": F}, ["old", "new_body"], mutates=True)
-def _supersede(old, new_body, confidence=None):
+def _supersede(old: str, new_body: str, confidence: float | None = None) -> str:
     scope, node = _resolve(old)
-    if node is None:
+    if node is None or scope is None:
         return f"error: no memory node found matching {old!r}"
     new_id = store.write_node(
         scope, node["type"], node["title"], new_body,
@@ -153,9 +154,9 @@ def _supersede(old, new_body, confidence=None):
     "Add an explicit relation between two existing memory nodes (contradicts, "
     "depends_on, part_of, mentions, relates_to).",
     {"a": S, "b": S, "relation": S}, ["a", "b", "relation"], mutates=True)
-def _link(a, b, relation):
+def _link(a: str, b: str, relation: str) -> str:
     scope_a, node_a = _resolve(a)
-    if node_a is None:
+    if node_a is None or scope_a is None:
         return f"error: no memory node found matching {a!r}"
     # Edges live inside a single sqlite db, so both ends must be in the same
     # scope -- look b up in a's scope directly rather than resolving it

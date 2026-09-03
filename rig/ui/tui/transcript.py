@@ -1,7 +1,6 @@
-"""The scrolling conversation pane. Mirrors `ui/plain.render`'s wording for the
-dim one-liners so the two front ends read the same, without sharing plain.py's
-console-printing code (plain.py's tests print through a live `rich.Console`
-and are left untouched)."""
+"""The scrolling conversation pane. Renders the dim one-liners via
+`ui/format.py`, which both front ends share so they cannot drift on wording
+(plain.py's tests print through a live `rich.Console` and are left untouched)."""
 from __future__ import annotations
 
 from rich.markdown import Markdown
@@ -9,42 +8,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from ... import events
-
-
-def _tool_start_text(ev: events.ToolStart) -> str:
-    if ev.subagent_id:
-        return f"  [dim]⏺ {ev.name}  {ev.args_preview}  ({ev.tier}·{ev.subagent_id})[/dim]"
-    return f"[dim]⏺ {ev.name}[/dim] [dim italic]{ev.args_preview}[/dim italic]"
-
-
-def _tool_end_text(ev: events.ToolEnd) -> str | None:
-    if not ev.offloaded:
-        return None
-    return f"  [dim]↳ offloaded → artifact {ev.artifact_id}[/dim]"
-
-
-def _subagent_spawned_text(ev: events.SubagentSpawned) -> str:
-    return f"[dim]⏺ subagent({ev.tier}) {ev.task_preview}  [{ev.subagent_id}][/dim]"
-
-
-def _subagent_done_text(ev: events.SubagentDone) -> str:
-    return f"  [dim]✓ {ev.subagent_id} done[/dim]"
-
-
-def _compacted_text(ev: events.Compacted) -> str:
-    return f"[dim]⏺ {ev.note}[/dim]"
-
-
-def _memory_write_text(ev: events.MemoryWrite) -> str:
-    return f"  [dim]◆ memory: {ev.type} '{ev.title}' ({ev.scope})[/dim]"
-
-
-def _memory_consolidated_text(ev: events.MemoryConsolidated) -> str:
-    return f"  [dim]◆ memory: {ev.summary}[/dim]"
-
-
-def _error_text(ev: events.Error) -> str:
-    return f"[red]error:[/red] {ev.message}"
+from .. import format
 
 
 class Transcript(VerticalScroll):
@@ -90,30 +54,30 @@ class Transcript(VerticalScroll):
         self._live_text = ""
 
     def add_tool_start(self, ev: events.ToolStart) -> None:
-        self._append(_tool_start_text(ev))
+        self._append(format.tool_start(ev))
 
     def add_tool_end(self, ev: events.ToolEnd) -> None:
-        text = _tool_end_text(ev)
+        text = format.tool_end(ev)
         if text is not None:
             self._append(text)
 
     def add_subagent_spawned(self, ev: events.SubagentSpawned) -> None:
-        self._append(_subagent_spawned_text(ev))
+        self._append(format.subagent_spawned(ev))
 
     def add_subagent_done(self, ev: events.SubagentDone) -> None:
-        self._append(_subagent_done_text(ev))
+        self._append(format.subagent_done(ev))
 
     def add_compacted(self, ev: events.Compacted) -> None:
-        self._append(_compacted_text(ev))
+        self._append(format.compacted(ev))
 
     def add_memory_write(self, ev: events.MemoryWrite) -> None:
-        self._append(_memory_write_text(ev))
+        self._append(format.memory_write(ev))
 
     def add_memory_consolidated(self, ev: events.MemoryConsolidated) -> None:
-        self._append(_memory_consolidated_text(ev))
+        self._append(format.memory_consolidated(ev))
 
     def add_error(self, ev: events.Error) -> None:
-        self._append(_error_text(ev))
+        self._append(format.error(ev))
 
     def add_mode_switch(self, mode: str) -> None:
         self._append(f"[dim]mode: {mode}[/dim]")

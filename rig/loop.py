@@ -1,8 +1,12 @@
 import asyncio
 import time
 from collections.abc import Callable
+from typing import cast
 
 from . import compact, events, llm, memory, subagent, tools
+from .config import Config
+from .llm import ToolCall, Turn
+from .session import Message
 
 BUILD_SYSTEM = """You are rig, a terminal coding agent.
 
@@ -55,15 +59,15 @@ Large tool outputs are saved as artifacts with a preview + id -- use
 fetch_result(id) rather than re-running a command; ask_user only when truly
 blocked on a decision only the user can make."""
 
-_MEMORY_SNAPSHOT = None
+_MEMORY_SNAPSHOT: str | None = None
 
-MODES = {
+MODES: dict[str, tuple[str, set[str] | None]] = {
     "build": (BUILD_SYSTEM, None),
     "plan": (PLAN_SYSTEM, tools.READ_ONLY),
 }
 
 
-def _args_preview(call) -> str:
+def _args_preview(call: ToolCall) -> str:
     try:
         args = call.args()
         detail = str(args.get("path") or args.get("pattern") or args.get("command")
@@ -73,10 +77,11 @@ def _args_preview(call) -> str:
     return detail[:60]
 
 
-async def run_agent(cfg, role_name, system, history, tool_names=None,
+async def run_agent(cfg: Config, role_name: str, system: str, history: list[Message],
+                    tool_names: set[str] | None = None,
                     emit: Callable[[events.Event], None] | None = None,
-                    max_rounds=60, subagent_id: str | None = None,
-                    tier: str | None = None):
+                    max_rounds: int = 60, subagent_id: str | None = None,
+                    tier: str | None = None) -> str:
     emit = emit or (lambda _e: None)
     role = cfg.role(role_name)
     schemas = tools.schemas(tool_names)
@@ -88,22 +93,23 @@ async def run_agent(cfg, role_name, system, history, tool_names=None,
         + compact.estimate_tokens(schemas)
 
     for _ in range(max_rounds):
-        messages = [{"role": "system", "content": system}, *history]
-        dispatched: list = []
-        turn = None
+        messages: list[Message] = [{"role": "system", "content": system}, *history]
+        dispatched: list[tuple[ToolCall, asyncio.Task[str], float]] = []
+        turn: Turn | None = None
 
         try:
             async for kind, payload in llm.stream(role, messages, schemas):
                 if kind == "text":
-                    emit(events.TextDelta(payload))
+                    emit(events.TextDelta(cast(str, payload)))
                 elif kind == "tool":
-                    emit(events.ToolStart(call_id=payload.id, name=payload.name,
-                                          args_preview=_args_preview(payload),
+                    call = cast(ToolCall, payload)
+                    emit(events.ToolStart(call_id=call.id, name=call.name,
+                                          args_preview=_args_preview(call),
                                           subagent_id=subagent_id, tier=tier))
-                    dispatched.append((payload, asyncio.create_task(
-                        tools.run(payload, allowed=tool_names)), time.monotonic()))
+                    dispatched.append((call, asyncio.create_task(
+                        tools.run(call, allowed=tool_names)), time.monotonic()))
                 elif kind == "done":
-                    turn = payload
+                    turn = cast(Turn, payload)
         except BaseException:
             # Never leave dispatched side-effecting tools running unobserved.
             for _c, t, _s in dispatched:
@@ -113,6 +119,7 @@ async def run_agent(cfg, role_name, system, history, tool_names=None,
                                      return_exceptions=True)
             raise
 
+        assert turn is not None, "llm.stream always ends with a 'done' event"
         history.append(turn.as_message())
         if not turn.tool_calls:
             emit(events.Done(turn.text))
@@ -146,8 +153,8 @@ async def run_agent(cfg, role_name, system, history, tool_names=None,
     return "(hit max rounds)"
 
 
-async def run_turn(cfg, history, mode="build",
-                   emit: Callable[[events.Event], None] | None = None):
+async def run_turn(cfg: Config, history: list[Message], mode: str = "build",
+                   emit: Callable[[events.Event], None] | None = None) -> str:
     tools.set_tainted(False)
     subagent.EMIT = emit
     system, tool_names = MODES[mode]

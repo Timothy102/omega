@@ -1,9 +1,14 @@
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
 from .config import Role
+from .session import Message
+
+StreamEvent = tuple[Literal["text"], str] | tuple[Literal["tool"], "ToolCall"] | tuple[Literal["done"], "Turn"]
 
 
 @dataclass
@@ -12,9 +17,9 @@ class ToolCall:
     name: str
     arguments: str = ""
 
-    def args(self) -> dict:
+    def args(self) -> dict[str, Any]:
         try:
-            return json.loads(self.arguments or "{}")
+            return dict(json.loads(self.arguments or "{}"))
         except json.JSONDecodeError as e:
             raise ValueError(f"bad arguments for {self.name}: {e}") from None
 
@@ -22,14 +27,14 @@ class ToolCall:
 @dataclass
 class Turn:
     text: str = ""
-    tool_calls: list = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
 
-    def as_message(self) -> dict:
-        msg = {"role": "assistant", "content": self.text or None}
+    def as_message(self) -> Message:
+        msg: Message = {"role": "assistant", "content": self.text or None}
         if self.tool_calls:
             msg["tool_calls"] = [
                 {"id": c.id, "type": "function",
@@ -39,7 +44,7 @@ class Turn:
         return msg
 
 
-_clients: dict = {}
+_clients: dict[str, AsyncOpenAI] = {}
 
 
 def client_for(role: Role) -> AsyncOpenAI:
@@ -49,15 +54,16 @@ def client_for(role: Role) -> AsyncOpenAI:
     return _clients[p.name]
 
 
-async def stream(role: Role, messages: list, tools: list | None = None):
+async def stream(role: Role, messages: list[Message],
+                 tools: list[dict[str, Any]] | None = None) -> AsyncIterator[StreamEvent]:
     """Yield ('text', delta) and ('tool', ToolCall) events.
 
     A tool call is emitted the moment its arguments are known to be complete --
     when a higher-indexed call begins, or when the stream ends -- so the caller
     can start executing it while the model is still generating the next one.
     """
-    kwargs = {"model": role.model, "messages": messages, "stream": True,
-              "stream_options": {"include_usage": True}}
+    kwargs: dict[str, Any] = {"model": role.model, "messages": messages, "stream": True,
+                              "stream_options": {"include_usage": True}}
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
@@ -112,7 +118,7 @@ async def stream(role: Role, messages: list, tools: list | None = None):
         if choice.finish_reason:
             turn.finish_reason = choice.finish_reason
 
-    incomplete = []
+    incomplete: list[str] = []
     for i in sorted(i for i in pending if i not in emitted):
         call = pending[i]
         # finish_reason "length" means generation was cut off mid-call: its

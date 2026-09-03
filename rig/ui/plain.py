@@ -1,13 +1,17 @@
 import asyncio
+from typing import Any
 
 from rich.console import Console
 
 from .. import events, loop, permissions
+from ..config import Config
+from ..session import Message, Session
+from . import format
 
 console = Console()
 
 
-async def confirm(name, args, why) -> bool:
+async def confirm(name: str, args: dict[str, Any], why: str) -> bool:
     detail = str(args.get("command") or args.get("path")
                  or args.get("name") or "")[:200]
     console.print(f"\n[yellow]⏸  {name}[/yellow] [dim]{why}[/dim]")
@@ -24,7 +28,7 @@ async def confirm(name, args, why) -> bool:
     return answer.startswith("y")
 
 
-async def ask_user(question: str, options: list, multi_select: bool = False) -> str:
+async def ask_user(question: str, options: list[events.Option], multi_select: bool = False) -> str:
     console.print(f"\n[yellow]?[/yellow] {question}", highlight=False)
     labels = [opt.get("label", "") for opt in options]
     for i, opt in enumerate(options, 1):
@@ -51,46 +55,39 @@ async def ask_user(question: str, options: list, multi_select: bool = False) -> 
     return resolve(answer)
 
 
-def render(ev: events.Event):
+def render(ev: events.Event) -> None:
     match ev:
         case events.TextDelta(text=text):
             console.print(text, end="", markup=False, highlight=False)
-        case events.ToolStart(name=name, args_preview=detail, subagent_id=sid, tier=tier):
-            if sid:
-                console.print(f"\n  [dim]⏺ {name}  {detail}  ({tier}·{sid})[/dim]",
-                              highlight=False)
-            else:
-                console.print(f"\n[dim]⏺ {name}[/dim] [dim italic]{detail}[/dim italic]",
-                              highlight=False)
-        case events.ToolEnd(offloaded=True, artifact_id=artifact_id):
-            console.print(f"  [dim]↳ offloaded → artifact {artifact_id}[/dim]",
-                          highlight=False)
+        case events.ToolStart():
+            console.print("\n" + format.tool_start(ev), highlight=False)
         case events.ToolEnd():
-            pass
-        case events.SubagentSpawned(subagent_id=sid, tier=tier, task_preview=task_preview):
-            console.print(f"\n[dim]⏺ subagent({tier}) {task_preview}  [{sid}][/dim]",
-                          highlight=False)
-        case events.SubagentDone(subagent_id=sid):
-            console.print(f"  [dim]✓ {sid} done[/dim]", highlight=False)
-        case events.Compacted(note=note):
-            console.print(f"\n[dim]⏺ {note}[/dim]", highlight=False)
-        case events.MemoryWrite(type=type_, title=title, scope=scope):
-            console.print(f"  [dim]◆ memory: {type_} '{title}' ({scope})[/dim]",
-                          highlight=False)
-        case events.MemoryConsolidated(summary=summary):
-            console.print(f"  [dim]◆ memory: {summary}[/dim]", highlight=False)
-        case events.Error(message=message):
-            console.print(f"\n[red]error:[/red] {message}", highlight=False)
+            end_text = format.tool_end(ev)
+            if end_text is not None:
+                console.print(end_text, highlight=False)
+        case events.SubagentSpawned():
+            console.print("\n" + format.subagent_spawned(ev), highlight=False)
+        case events.SubagentDone():
+            console.print(format.subagent_done(ev), highlight=False)
+        case events.Compacted():
+            console.print("\n" + format.compacted(ev), highlight=False)
+        case events.MemoryWrite():
+            console.print(format.memory_write(ev), highlight=False)
+        case events.MemoryConsolidated():
+            console.print(format.memory_consolidated(ev), highlight=False)
+        case events.Error():
+            console.print("\n" + format.error(ev), highlight=False)
         case events.Done():
             pass
         case events.Usage():
             pass
 
 
-async def run_prompt(cfg, history, prompt, mode, sess=None):
+async def run_prompt(cfg: Config, history: list[Message], prompt: str, mode: str,
+                     sess: Session | None = None) -> None:
     history.append({"role": "user", "content": prompt})
 
-    def emit(ev):
+    def emit(ev: events.Event) -> None:
         render(ev)
         if (sess and isinstance(ev, events.Compacted)
                 and not ev.note.startswith("compaction skipped")):

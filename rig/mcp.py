@@ -3,13 +3,16 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.types import TextContent
+from mcp.types import Tool as McpTool
 
 from . import tools
 
-SERVERS: dict = {}
+SERVERS: dict[str, "Server"] = {}
 
 # Pinned: an unpinned `npx -y mcp-remote` executes whatever npm serves as
 # latest, on every single run.
@@ -27,7 +30,7 @@ NOISE_KEYS = {"examples", "example", "default", "$comment", "$schema", "$id",
               "additionalProperties", "readOnly", "writeOnly", "deprecated"}
 
 
-def prune_schema(node, depth=0):
+def prune_schema(node: Any, depth: int = 0) -> Any:
     """Strip JSON Schema down to what a model needs to CALL a tool.
 
     Measured on linear+notion+posthog: descriptions were 59.5k chars, parameters
@@ -39,7 +42,7 @@ def prune_schema(node, depth=0):
     if not isinstance(node, dict):
         return node
 
-    out = {}
+    out: dict[str, Any] = {}
     for k, v in node.items():
         if k in NOISE_KEYS:
             continue
@@ -61,9 +64,9 @@ def prune_schema(node, depth=0):
     return out
 
 
-def fit_params(schema: dict) -> dict:
+def fit_params(schema: dict[str, Any]) -> dict[str, Any]:
     """Prune, then drop optional property descriptions until it fits."""
-    pruned = prune_schema(schema or {"type": "object", "properties": {}})
+    pruned: dict[str, Any] = prune_schema(schema or {"type": "object", "properties": {}})
     if len(json.dumps(pruned)) <= PARAMS_LIMIT:
         return pruned
     required = set(pruned.get("required") or [])
@@ -84,7 +87,7 @@ def fit_params(schema: dict) -> dict:
     return pruned
 
 
-def discover(paths=None) -> dict:
+def discover(paths: list[Path] | None = None) -> dict[str, dict[str, Any]]:
     """rig's own mcp block wins; Claude Code's config and installed plugins
     (which ship their own .mcp.json) are imported under it."""
     if paths is None:
@@ -93,9 +96,9 @@ def discover(paths=None) -> dict:
         if plugins.exists():
             for depth in range(1, 5):
                 paths += sorted(plugins.glob("/".join(["*"] * depth) + "/.mcp.json"))
-    found: dict = {}
+    found: dict[str, dict[str, Any]] = {}
 
-    def walk(o):
+    def walk(o: Any) -> None:
         if isinstance(o, dict):
             for k, v in o.items():
                 if k == "mcpServers" and isinstance(v, dict):
@@ -122,7 +125,7 @@ def discover(paths=None) -> dict:
     return found
 
 
-def as_stdio(cfg: dict) -> dict:
+def as_stdio(cfg: dict[str, Any]) -> dict[str, Any]:
     """Any remote MCP server can be reached by proxying it through mcp-remote,
     which owns the OAuth dance and caches tokens in ~/.mcp-auth."""
     if "command" in cfg:
@@ -140,16 +143,16 @@ class Server:
     """Owns one MCP connection. anyio requires the context managers be entered
     and exited in the same task, so the whole lifecycle lives in _run."""
 
-    def __init__(self, name: str, cfg: dict):
+    def __init__(self, name: str, cfg: dict[str, Any]):
         self.name, self.cfg = name, cfg
-        self.session = None
-        self.tools: list = []
-        self.error = None
+        self.session: ClientSession | None = None
+        self.tools: list[McpTool] = []
+        self.error: str | None = None
         self.ready = asyncio.Event()
         self._stop = asyncio.Event()
-        self._task = None
+        self._task: asyncio.Task[None] | None = None
 
-    async def _run(self):
+    async def _run(self) -> None:
         try:
             command = self.cfg["command"]
             if not shutil.which(command):
@@ -169,13 +172,13 @@ class Server:
         finally:
             self.ready.set()
 
-    async def start(self, timeout=60):
+    async def start(self, timeout: float = 60) -> None:
         self._task = asyncio.create_task(self._run())
         await asyncio.wait_for(self.ready.wait(), timeout)
         if self.error:
             raise RuntimeError(self.error)
 
-    async def stop(self):
+    async def stop(self) -> None:
         self._stop.set()
         if not self._task:
             return
@@ -188,7 +191,7 @@ class Server:
             await asyncio.gather(self._task, return_exceptions=True)
 
 
-def _register(server: Server, tool) -> str:
+def _register(server: Server, tool: McpTool) -> str:
     name = f"mcp__{server.name}__{tool.name}"
     if len(name) > 64:
         # Truncating alone silently collapses two distinct tools into one key.
@@ -197,13 +200,15 @@ def _register(server: Server, tool) -> str:
 
     reads = tool.name.lower().startswith(READ_PREFIXES)
 
-    async def call(**kwargs):
+    async def call(**kwargs: Any) -> str:
+        session = server.session
+        assert session is not None, "call() invoked before the server finished starting"
         try:
             result = await asyncio.wait_for(
-                server.session.call_tool(tool.name, kwargs), CALL_TIMEOUT)
+                session.call_tool(tool.name, kwargs), CALL_TIMEOUT)
         except TimeoutError:
             return f"error: MCP server {server.name!r} timed out after {CALL_TIMEOUT}s"
-        parts = [c.text for c in result.content if getattr(c, "text", None)]
+        parts = [c.text for c in result.content if isinstance(c, TextContent) and c.text]
         body = tools.truncate("\n".join(parts) or "(no content)")
         # Remote content is writable by anyone in that workspace: mark the turn
         # so bash drops to ASK for the rest of it.
@@ -216,19 +221,19 @@ def _register(server: Server, tool) -> str:
 
     if reads:
         tools.READ_ONLY.add(name)
-    tools.REGISTRY[name] = {
-        "fn": call, "locks_path": None, "mutates": not reads, "deferred": True,
-        "schema": {"type": "function", "function": {
+    tools.REGISTRY[name] = tools.ToolEntry(
+        fn=call, locks_path=None, mutates=not reads, deferred=True,
+        schema={"type": "function", "function": {
             "name": name,
             "description": (tool.description or "")[:DESC_LIMIT],
             "parameters": fit_params(tool.inputSchema),
         }},
-    }
+    )
     return name
 
 
-async def load(only=None, timeout=60) -> dict:
-    report = {}
+async def load(only: set[str] | None = None, timeout: float = 60) -> dict[str, str]:
+    report: dict[str, str] = {}
     for name, cfg in discover().items():
         if only and name not in only:
             continue
@@ -253,7 +258,7 @@ async def load(only=None, timeout=60) -> dict:
     return report
 
 
-async def shutdown():
+async def shutdown() -> None:
     for s in SERVERS.values():
         try:
             await s.stop()

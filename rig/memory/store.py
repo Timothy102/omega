@@ -3,7 +3,11 @@ import re
 import secrets
 import sqlite3
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
+
+Node = dict[str, Any]
 
 GLOBAL_DIR = Path.home() / ".rig" / "memory"
 
@@ -51,11 +55,11 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 
-def project_dir(cwd=None) -> Path:
+def project_dir(cwd: str | None = None) -> Path:
     return Path(cwd or os.getcwd()) / ".rig"
 
 
-def _db_path(scope: str, cwd=None) -> Path:
+def _db_path(scope: str, cwd: str | None = None) -> Path:
     if scope not in SCOPES:
         raise ValueError(f"invalid scope {scope!r}; expected one of {sorted(SCOPES)}")
     if scope == "global":
@@ -63,11 +67,11 @@ def _db_path(scope: str, cwd=None) -> Path:
     return project_dir(cwd) / "memory.db"
 
 
-def db_exists(scope: str, cwd=None) -> bool:
+def db_exists(scope: str, cwd: str | None = None) -> bool:
     return _db_path(scope, cwd).exists()
 
 
-def _bootstrap_project(cwd=None):
+def _bootstrap_project(cwd: str | None = None) -> None:
     root = Path(cwd or os.getcwd())
     project_dir(cwd).mkdir(parents=True, exist_ok=True)
     # Never touch .gitignore outside an actual repo -- a bare cwd or $HOME
@@ -85,7 +89,7 @@ def _bootstrap_project(cwd=None):
         f.write(line + "\n")
 
 
-def connect(scope: str, cwd=None) -> sqlite3.Connection:
+def connect(scope: str, cwd: str | None = None) -> sqlite3.Connection:
     path = _db_path(scope, cwd)
     if scope == "project" and not path.exists():
         _bootstrap_project(cwd)
@@ -101,7 +105,7 @@ def connect(scope: str, cwd=None) -> sqlite3.Connection:
     return conn
 
 
-def _validate(**kwargs):
+def _validate(**kwargs: str | None) -> None:
     checks = {"type": TYPES, "volatility": VOLATILITIES, "sensitivity": SENSITIVITIES,
               "relation": RELATIONS}
     for field, value in kwargs.items():
@@ -109,8 +113,9 @@ def _validate(**kwargs):
             raise ValueError(f"invalid {field} {value!r}; expected one of {sorted(checks[field])}")
 
 
-def write_node(scope, type, title, body, confidence=0.8, volatility="stable",
-               sensitivity="normal", importance=0.5, source_session_id=None, cwd=None) -> str:
+def write_node(scope: str, type: str, title: str, body: str, confidence: float = 0.8,
+               volatility: str = "stable", sensitivity: str = "normal", importance: float = 0.5,
+               source_session_id: str | None = None, cwd: str | None = None) -> str:
     _validate(type=type, volatility=volatility, sensitivity=sensitivity)
     conn = connect(scope, cwd)
     try:
@@ -128,7 +133,7 @@ def write_node(scope, type, title, body, confidence=0.8, volatility="stable",
         conn.close()
 
 
-def add_edge(scope, src, dst, relation, cwd=None):
+def add_edge(scope: str, src: str, dst: str, relation: str, cwd: str | None = None) -> None:
     _validate(relation=relation)
     conn = connect(scope, cwd)
     try:
@@ -139,7 +144,7 @@ def add_edge(scope, src, dst, relation, cwd=None):
         conn.close()
 
 
-def get(scope, id_or_title, cwd=None) -> dict | None:
+def get(scope: str, id_or_title: str, cwd: str | None = None) -> Node | None:
     conn = connect(scope, cwd)
     try:
         row = conn.execute("SELECT * FROM nodes WHERE id = ?", (id_or_title,)).fetchone()
@@ -152,20 +157,21 @@ def get(scope, id_or_title, cwd=None) -> dict | None:
         conn.close()
 
 
-def _fts_query_variants(query: str):
+def _fts_query_variants(query: str) -> Iterator[str]:
     yield query
     terms = re.findall(r"\w+", query)
     if terms:
         yield " ".join(f'"{t}"' for t in terms)
 
 
-def search(scope, query, type=None, limit=8, include_superseded=False, cwd=None) -> list:
+def search(scope: str, query: str, type: str | None = None, limit: int = 8,
+          include_superseded: bool = False, cwd: str | None = None) -> list[Node]:
     _validate(type=type)
     conn = connect(scope, cwd)
     try:
         sql = ("SELECT n.*, bm25(nodes_fts) AS rank FROM nodes_fts "
                "JOIN nodes n ON n.rowid = nodes_fts.rowid WHERE nodes_fts MATCH ?")
-        extra = []
+        extra: list[str] = []
         if type is not None:
             sql += " AND n.type = ?"
             extra.append(type)
@@ -187,13 +193,14 @@ def search(scope, query, type=None, limit=8, include_superseded=False, cwd=None)
         conn.close()
 
 
-def neighbors(scope, id, depth=1, cwd=None) -> list:
+def neighbors(scope: str, id: str, depth: int = 1, cwd: str | None = None) -> list[Node]:
     depth = min(max(depth, 0), 2)
     conn = connect(scope, cwd)
     try:
         visited = {id}
         frontier = [id]
-        results, seen = [], set()
+        results: list[Node] = []
+        seen: set[str] = set()
         for _ in range(depth):
             next_frontier = []
             for nid in frontier:
@@ -222,7 +229,7 @@ def neighbors(scope, id, depth=1, cwd=None) -> list:
         conn.close()
 
 
-def touch(scope, id, cwd=None):
+def touch(scope: str, id: str, cwd: str | None = None) -> None:
     conn = connect(scope, cwd)
     try:
         conn.execute("UPDATE nodes SET last_accessed = ?, access_count = access_count + 1 "
@@ -232,7 +239,7 @@ def touch(scope, id, cwd=None):
         conn.close()
 
 
-def mark_superseded(scope, old_id, new_id, cwd=None):
+def mark_superseded(scope: str, old_id: str, new_id: str, cwd: str | None = None) -> None:
     conn = connect(scope, cwd)
     try:
         conn.execute("UPDATE nodes SET superseded_by = ?, updated = ? WHERE id = ?",
@@ -242,13 +249,13 @@ def mark_superseded(scope, old_id, new_id, cwd=None):
         conn.close()
 
 
-def retag(scope, id, cwd=None, **fields):
+def retag(scope: str, id: str, cwd: str | None = None, **fields: str | float | None) -> None:
     fields = {k: v for k, v in fields.items() if k in ("volatility", "importance")
               and v is not None}
     if not fields:
         return
     if "volatility" in fields:
-        _validate(volatility=fields["volatility"])
+        _validate(volatility=str(fields["volatility"]))
     conn = connect(scope, cwd)
     try:
         set_clause = ", ".join(f"{k} = ?" for k in fields)
@@ -259,11 +266,12 @@ def retag(scope, id, cwd=None, **fields):
         conn.close()
 
 
-def recent(scope, since=None, limit=50, cwd=None) -> list:
+def recent(scope: str, since: float | None = None, limit: int = 50,
+          cwd: str | None = None) -> list[Node]:
     conn = connect(scope, cwd)
     try:
         sql = "SELECT * FROM nodes WHERE superseded_by IS NULL"
-        params = []
+        params: list[float] = []
         if since is not None:
             sql += " AND created >= ?"
             params.append(since)
@@ -274,7 +282,7 @@ def recent(scope, since=None, limit=50, cwd=None) -> list:
         conn.close()
 
 
-def all_nodes(scope, include_superseded=False, cwd=None) -> list:
+def all_nodes(scope: str, include_superseded: bool = False, cwd: str | None = None) -> list[Node]:
     conn = connect(scope, cwd)
     try:
         sql = "SELECT * FROM nodes"
@@ -285,7 +293,7 @@ def all_nodes(scope, include_superseded=False, cwd=None) -> list:
         conn.close()
 
 
-def bump_since_consolidation(scope, cwd=None):
+def bump_since_consolidation(scope: str, cwd: str | None = None) -> None:
     conn = connect(scope, cwd)
     try:
         conn.execute("UPDATE meta SET nodes_since_consolidation = nodes_since_consolidation + 1")
@@ -294,7 +302,7 @@ def bump_since_consolidation(scope, cwd=None):
         conn.close()
 
 
-def reset_consolidation(scope, cwd=None):
+def reset_consolidation(scope: str, cwd: str | None = None) -> None:
     conn = connect(scope, cwd)
     try:
         conn.execute("UPDATE meta SET nodes_since_consolidation = 0, last_consolidated = ?",
@@ -304,7 +312,7 @@ def reset_consolidation(scope, cwd=None):
         conn.close()
 
 
-def since_consolidation(scope, cwd=None) -> int:
+def since_consolidation(scope: str, cwd: str | None = None) -> int:
     conn = connect(scope, cwd)
     try:
         row = conn.execute("SELECT nodes_since_consolidation FROM meta").fetchone()

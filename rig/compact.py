@@ -1,6 +1,10 @@
 import json
+from typing import cast
 
 from . import llm
+from .config import Config
+from .llm import Turn
+from .session import Message
 
 FRACTION = 0.75
 KEEP_LAST = 6
@@ -14,11 +18,11 @@ Drop: raw file contents, long command output, and restated code.
 Write dense prose. No preamble."""
 
 
-def estimate_tokens(messages: list) -> int:
+def estimate_tokens(messages: list[Message]) -> int:
     return sum(len(json.dumps(m)) for m in messages) // 4
 
 
-def safe_split(history: list, keep_last: int) -> int:
+def safe_split(history: list[Message], keep_last: int) -> int:
     """Return an index to cut at that never separates an assistant message
     carrying tool_calls from the tool results that answer it.
 
@@ -40,8 +44,8 @@ def safe_split(history: list, keep_last: int) -> int:
     return 0
 
 
-async def maybe_compact(cfg, history: list, used: int, limit: int,
-                        fraction=FRACTION, keep_last=KEEP_LAST):
+async def maybe_compact(cfg: Config, history: list[Message], used: int, limit: int,
+                        fraction: float = FRACTION, keep_last: int = KEEP_LAST) -> str | None:
     """Shrink history in place. Returns a note if it compacted, else None."""
     if limit <= 0 or used < limit * fraction:
         return None
@@ -61,7 +65,7 @@ async def maybe_compact(cfg, history: list, used: int, limit: int,
             role, [{"role": "system", "content": SYSTEM},
                    {"role": "user", "content": transcript}]):
         if kind == "done":
-            summary = payload.text
+            summary = cast(Turn, payload).text
 
     if not summary.strip():
         return None
