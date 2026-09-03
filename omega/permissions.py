@@ -59,7 +59,12 @@ def rule_for(name: str, args: dict[str, Any]) -> str:
     if name == "bash":
         return f"bash:{_first_token(args.get('command', ''))}"
     if name == "call_tool":
-        return f"call_tool:{args.get('name', '')}"
+        tool = str(args.get("name", ""))
+        # One "always" per connected server, not per tool: the user authorised
+        # the integration, and a server with 40 tools would otherwise prompt
+        # 40 times.
+        m = re.match(r"(mcp__[^_]+(?:_[^_]+)*?)__", tool)
+        return f"call_tool:{m.group(1)}__*" if m else f"call_tool:{tool}"
     return name
 
 
@@ -105,7 +110,10 @@ def decide(name: str, args: dict[str, Any], cwd: str | None = None,
 
     if rule in stored["deny"]:
         return DENY, "denied by a saved rule"
-    if rule in stored["allow"] and not tainted:
+    # Taint (untrusted content read this turn) only downgrades bash, which is
+    # where a prompt injection could reach the machine. Ignoring saved rules
+    # for everything else made every MCP-heavy turn an endless prompt loop.
+    if rule in stored["allow"] and not (tainted and name == "bash"):
         return ALLOW, "allowed by a saved rule"
 
     if name in ("read", "grep", "glob", "recall", "find_tools", "subagent",

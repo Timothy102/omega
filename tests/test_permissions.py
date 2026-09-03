@@ -53,3 +53,18 @@ def test_deny_beats_a_saved_allow_rule(tmp_path):
 
 def test_skill_tool_is_read_only():
     assert P.decide("skill", {"name": "debug"})[0] == P.ALLOW
+
+
+def test_saved_allow_survives_taint_for_non_bash(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "STORE", tmp_path / "permissions.json")
+    args = {"name": "mcp__linear__save_issue", "arguments": {}}
+    P.remember(P.rule_for("call_tool", args), P.ALLOW)
+    assert P.decide("call_tool", args, tainted=True)[0] == P.ALLOW
+    assert P.decide("bash", {"command": "ls"}, tainted=True)[0] == P.ASK
+
+
+def test_call_tool_always_covers_the_whole_server(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "STORE", tmp_path / "permissions.json")
+    P.remember(P.rule_for("call_tool", {"name": "mcp__linear__save_issue"}), P.ALLOW)
+    assert P.decide("call_tool", {"name": "mcp__linear__list_issues"})[0] == P.ALLOW
+    assert P.decide("call_tool", {"name": "mcp__notion__search"})[0] == P.ASK
