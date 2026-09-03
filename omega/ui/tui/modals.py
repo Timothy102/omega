@@ -3,15 +3,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.syntax import Syntax
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
-from ... import events, permissions
+from ... import events, gitlog, permissions
 from ...config import Model
 
 _DIALOG_CSS = """
@@ -201,4 +202,40 @@ class ModelPickerScreen(ModalScreen[str | None]):
         self.dismiss(self.aliases[message.option_index])
 
     def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class DiffScreen(ModalScreen[None]):
+    """`git diff -- <path>`, opened from a Git-tab change row."""
+
+    DEFAULT_CSS = _DIALOG_CSS + """
+    DiffScreen { align: center middle; }
+    DiffScreen #dialog { width: 90%; max-width: 140; }
+    DiffScreen #diff-body { height: 30; max-height: 80%; }
+    """
+    BINDINGS = [Binding("escape", "close", show=False), Binding("q", "close", show=False)]
+
+    def __init__(self, repo: gitlog.Repo, path: str) -> None:
+        super().__init__()
+        self._repo = repo
+        self._path = path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static(f"[bold]{self._path}[/bold]  [dim]esc to close[/dim]")
+            yield VerticalScroll(Static("[dim]loading…[/dim]"), id="diff-body")
+
+    def on_mount(self) -> None:
+        self.run_worker(self._load(), exclusive=True)
+
+    async def _load(self) -> None:
+        text = await gitlog.diff_async(self._repo, self._path)
+        body = self.query_one("#diff-body", VerticalScroll)
+        await body.remove_children()
+        if not text:
+            await body.mount(Static("[dim](no diff)[/dim]"))
+            return
+        await body.mount(Static(Syntax(text, "diff", theme="monokai", word_wrap=True)))
+
+    def action_close(self) -> None:
         self.dismiss(None)

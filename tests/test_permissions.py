@@ -49,3 +49,7 @@ def test_saved_allow_rule_is_honoured(tmp_path):
 def test_deny_beats_a_saved_allow_rule(tmp_path):
     P.remember("bash:sudo", P.ALLOW)
     assert P.decide("bash", {"command": "sudo rm x"})[0] == P.DENY
+
+
+def test_skill_tool_is_read_only():
+    assert P.decide("skill", {"name": "debug"})[0] == P.ALLOW

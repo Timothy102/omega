@@ -149,6 +149,9 @@ omega connections                  # manage MCP servers (see ## MCP)
 omega "list my Linear issues"      # connects enabled MCP servers lazily
 omega --mcp "..."                  # or connect everything eagerly at startup
 omega --yolo "..."                 # skip permission prompts
+omega eval run                     # headless task-suite scoring (see ## Eval harness)
+omega --version                    # print the version
+omega --help                       # usage and flags
 ```
 
 The first time omega runs with no `~/.omega/config.json`, or with no usable key
@@ -261,6 +264,71 @@ flags contradictions, and retags stale entries — automatically at session
 close once 5+ new nodes have accumulated, or on demand with `omega memory gc`
 (`/memory-gc` in the REPL).
 
+## Skills and project instructions
+
+Two ways to steer the agent beyond a single prompt:
+
+**Instructions** — an `OMEGA.md` (or `CLAUDE.md`, read as a fallback where no
+`OMEGA.md` exists) is loaded once at startup and folded into the system
+prompt: `~/.omega/OMEGA.md` (global) first, then every `OMEGA.md` from the
+git root down to your working directory — so a monorepo subdir's file adds
+to the root's instead of replacing it — then `.omega/instructions.md` if
+present. Capped at 12,000 characters total, with a pointer to `read` the
+source file for anything trimmed.
+
+**Skills** — a `SKILL.md` (frontmatter `name` + `description`, then a
+markdown checklist) is a sub-workflow the model loads on demand with the
+`skill` tool and follows in the same conversation — not a subagent, so
+nothing about the task is lost switching to it. omega reads the same format
+Claude Code uses, so `~/.claude/skills/*` work here unchanged. Discovery
+order (highest precedence first): `.omega/skills/*/SKILL.md` (project),
+`~/.omega/skills/*/SKILL.md` (global), `~/.claude/skills/*/SKILL.md`. A
+compact index (name + description) sits in the system prompt; `skill(name)`
+fetches the full body, with any relative file links it contains rewritten to
+absolute paths so `read` can follow them.
+
+```bash
+omega skills                # table: name, source, description
+omega skills show <name>    # print a skill's body as the model sees it
+```
+
+## Eval harness
+
+`omega eval` runs a suite of coding tasks headlessly against one or more
+models and scores the results — the way to answer "did that prompt/config
+change make things better or worse" with numbers instead of a vibe.
+
+A task is a YAML file:
+
+```yaml
+name: version-flag
+prompt: Add a --version flag to the CLI...
+repo: .                 # path to run against (default: ".")
+setup: git checkout -- . && git clean -fd   # optional, run before the agent
+check: "uv run omega --version | grep -q 0.3"   # shell command, exit 0 = pass
+timeout_s: 600           # default 600
+mode: build               # build | plan (default build)
+tags: [cli, smoke]
+```
+
+```bash
+omega eval init                          # copy 3 example tasks into .omega/evals/
+omega eval run                           # run .omega/evals/*.yaml against the `main` role
+omega eval run --models opus,sonnet,spark --repeat 3 --jobs 4
+omega eval run path/to/one-task.yaml --json
+omega eval compare 20260901-101500 20260903-090000   # diff two runs
+```
+
+Each run happens in a throwaway copy of `repo` — a `git worktree` for a git
+repo, a plain directory copy otherwise — never the repo you're actually
+working in. `--yolo` semantics apply (no permission prompts). Per task ×
+model × repeat, omega records pass/fail (from `check`'s exit code), model
+rounds, tool calls by name, tokens in/out, an estimated cost from a
+per-million-token price table (`omega/eval/prices.py`), wall time, and a
+context telemetry manifest (per-round token/tool breakdown, system-prompt
+size by zone, and an estimate-vs-actual token drift). Everything lands in
+`.omega/evals/runs/<timestamp>/report.json`, plus a table on stdout.
+
 ## Development
 
 Uses [uv](https://docs.astral.sh/uv/), [ruff](https://docs.astral.sh/ruff/),
@@ -283,6 +351,11 @@ uv run mypy
 ~/.omega/memory/memory.db               global memory (SQLite + FTS5)
 <project>/.omega/memory.db              project memory (gitignored)
 ~/.omega/history                        REPL input history
+~/.omega/OMEGA.md                       global instructions
+<project>/.omega/instructions.md        project instructions (local-only)
+<project>/OMEGA.md                      project instructions (shared, committed)
+~/.omega/skills/*/SKILL.md              global skills
+<project>/.omega/skills/*/SKILL.md      project skills
 ```
 
 Sessions contain full transcripts, including file contents and command output.

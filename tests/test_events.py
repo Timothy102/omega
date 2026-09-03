@@ -79,10 +79,26 @@ def test_event_type_alias_covers_all_variants():
     expected = {events.TextDelta, events.ToolStart, events.ToolEnd, events.Compacted,
                 events.MemoryWrite, events.MemoryConsolidated, events.SubagentSpawned,
                 events.SubagentDone, events.Error, events.Done, events.Usage, events.ModelUsed,
-                events.Phase}
+                events.Phase, events.Fallback}
     assert args == expected
 
 
 def test_phase_construction():
     e = events.Phase(state="thinking")
     assert e.state == "thinking"
+
+
+def test_usage_cache_fields_default_to_zero():
+    e = events.Usage(prompt_tokens=10, completion_tokens=5, used=15, limit=1000)
+    assert e.cache_read == 0 and e.cache_write == 0
+
+
+def test_usage_cache_fields_set():
+    e = events.Usage(prompt_tokens=10, completion_tokens=5, used=15, limit=1000,
+                     cache_read=8, cache_write=2)
+    assert e.cache_read == 8 and e.cache_write == 2
+
+
+def test_fallback_construction():
+    e = events.Fallback(from_model="claude-opus-5", to_model="claude-sonnet-5", reason="529 overloaded")
+    assert (e.from_model, e.to_model, e.reason) == ("claude-opus-5", "claude-sonnet-5", "529 overloaded")

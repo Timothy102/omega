@@ -23,11 +23,15 @@ DEFAULTS: dict[str, Any] = {
         },
     },
     "models": {
-        "fable":  {"model": "claude-fable-5-1", "provider": "anthropic", "context": 1048576, "effort": "xhigh"},
-        "opus":   {"model": "claude-opus-5", "provider": "anthropic", "context": 1048576, "effort": "high"},
-        "sonnet": {"model": "claude-sonnet-5", "provider": "anthropic", "context": 1048576, "effort": "high"},
+        "fable":  {"model": "claude-fable-5-1", "provider": "anthropic", "context": 1048576,
+                   "effort": "xhigh", "fallback": "opus"},
+        "opus":   {"model": "claude-opus-5", "provider": "anthropic", "context": 1048576,
+                   "effort": "high", "fallback": "sonnet"},
+        "sonnet": {"model": "claude-sonnet-5", "provider": "anthropic", "context": 1048576,
+                   "effort": "high", "fallback": "haiku"},
         "haiku":  {"model": "claude-haiku-4-5", "provider": "anthropic", "context": 200000},
-        "spark":  {"model": "meta/muse-spark-1.3", "provider": "openrouter", "context": 1048576},
+        "spark":  {"model": "meta/muse-spark-1.3", "provider": "openrouter", "context": 1048576,
+                   "fallback": "kimi"},
         "kimi":   {"model": "moonshotai/kimi-k3", "provider": "openrouter", "context": 1048576},
         "glm":    {"model": "z-ai/glm-5.3-flash", "provider": "openrouter", "context": 128000},
     },
@@ -81,6 +85,7 @@ class Model:
     provider: str
     context: int = 128000
     effort: str | None = None
+    fallback: str | None = None
 
 
 @dataclass
@@ -90,6 +95,7 @@ class Role:
     context: int = 128000
     effort: str | None = None
     alias: str | None = None
+    fallback_alias: str | None = None
 
 
 @dataclass
@@ -109,7 +115,7 @@ class Config:
         m = self.models[alias]
         if m.provider not in self.providers:
             raise KeyError(f"model {alias!r} references unknown provider {m.provider!r}")
-        return Role(m.model, self.providers[m.provider], m.context, m.effort, alias)
+        return Role(m.model, self.providers[m.provider], m.context, m.effort, alias, m.fallback)
 
     def resolve_alias(self, text: str) -> str:
         """Resolve a `--model`/`/model` argument to a catalog alias: an exact
@@ -158,12 +164,14 @@ def load() -> Config:
 
     models: dict[str, Model] = {}
     for alias, m in (raw.get("models") or {}).items():
-        models[alias] = Model(alias, m["model"], m["provider"], m.get("context", 128000), m.get("effort"))
+        models[alias] = Model(alias, m["model"], m["provider"], m.get("context", 128000),
+                              m.get("effort"), m.get("fallback"))
     # A hand-written config predating the catalog would otherwise leave the
     # /model picker empty; built-ins fill in wherever their provider exists.
     for alias, m in DEFAULTS["models"].items():
         if alias not in models and m["provider"] in providers:
-            models[alias] = Model(alias, m["model"], m["provider"], m.get("context", 128000), m.get("effort"))
+            models[alias] = Model(alias, m["model"], m["provider"], m.get("context", 128000),
+                                  m.get("effort"), m.get("fallback"))
 
     cfg = Config(models=models, providers=providers)
 

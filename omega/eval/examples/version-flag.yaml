@@ -1,0 +1,10 @@
+name: version-flag
+prompt: >
+  Add a `--version` flag to omega's CLI: `omega --version` should print the
+  installed package version and exit without starting an agent turn. Wire it
+  into omega/__main__.py next to the other top-level flags.
+repo: .
+check: "uv run omega --version | grep -Eq '[0-9]+\\.[0-9]+\\.[0-9]+'"
+timeout_s: 600
+mode: build
+tags: [cli, smoke]

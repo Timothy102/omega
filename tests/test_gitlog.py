@@ -156,3 +156,111 @@ async def test_async_wrappers_match_sync(tmp_path: Path) -> None:
     commits = await gitlog.recent_commits_async(repos[0])
     assert len(commits) == 1
     assert commits[0].subject == "initial"
+
+
+def test_working_tree_modified_file_reports_added_removed(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial", filename="file.txt", content="one\ntwo\nthree\n")
+    (tmp_path / "file.txt").write_text("one\ntwo-changed\nthree\nfour\n")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    changes = gitlog.working_tree(repo)
+
+    assert len(changes) == 1
+    change = changes[0]
+    assert change.path == "file.txt"
+    assert change.status == "M"
+    assert change.added == 2
+    assert change.removed == 1
+
+
+def test_working_tree_staged_new_file_reports_added(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial")
+    (tmp_path / "new.txt").write_text("a\nb\nc\n")
+    _git(tmp_path, "add", "new.txt")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    changes = gitlog.working_tree(repo)
+
+    assert len(changes) == 1
+    assert changes[0].path == "new.txt"
+    assert changes[0].status == "A"
+    assert changes[0].added == 3
+    assert changes[0].removed == 0
+
+
+def test_working_tree_deleted_file_reports_zero_counts(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial")
+    _git(tmp_path, "rm", "-q", "file.txt")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    changes = gitlog.working_tree(repo)
+
+    assert len(changes) == 1
+    assert changes[0].path == "file.txt"
+    assert changes[0].status == "D"
+    assert changes[0].added == 0
+    assert changes[0].removed == 0
+
+
+def test_working_tree_untracked_file_reports_zero_counts(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial")
+    (tmp_path / "untracked.txt").write_text("hello\n")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    changes = gitlog.working_tree(repo)
+
+    assert len(changes) == 1
+    assert changes[0].path == "untracked.txt"
+    assert changes[0].status == "?"
+    assert changes[0].added == 0
+    assert changes[0].removed == 0
+
+
+def test_working_tree_clean_repo_returns_empty(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    assert gitlog.working_tree(repo) == []
+
+
+def test_diff_modified_tracked_file_contains_new_content(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial", filename="file.txt", content="one\ntwo\n")
+    (tmp_path / "file.txt").write_text("one\nchanged\n")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    out = gitlog.diff(repo, "file.txt")
+
+    assert "+changed" in out
+
+
+def test_diff_untracked_file_falls_back_to_no_index(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial")
+    (tmp_path / "untracked.txt").write_text("brand new content\n")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    out = gitlog.diff(repo, "untracked.txt")
+
+    assert out
+    assert "brand new content" in out
+
+
+async def test_working_tree_and_diff_async_wrappers_match_sync(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _commit(tmp_path, "initial", filename="file.txt", content="one\ntwo\n")
+    (tmp_path / "file.txt").write_text("one\nchanged\n")
+
+    repo = gitlog.discover_repos(tmp_path)[0]
+    sync_changes = gitlog.working_tree(repo)
+    async_changes = await gitlog.working_tree_async(repo)
+    assert async_changes == sync_changes
+
+    sync_diff = gitlog.diff(repo, "file.txt")
+    async_diff = await gitlog.diff_async(repo, "file.txt")
+    assert async_diff == sync_diff

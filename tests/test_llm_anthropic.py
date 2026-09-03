@@ -100,6 +100,7 @@ class FakeUsage:
     input_tokens: int
     output_tokens: int
     cache_read_input_tokens: int
+    cache_creation_input_tokens: int = 0
 
 
 @dataclass
@@ -164,7 +165,8 @@ def make_fake_client() -> FakeAnthropicClient:
             FakeBlock("tool_use"),
             FakeBlock("thinking", thinking_text="reasoning...", signature="sig-abc"),
         ],
-        usage=FakeUsage(input_tokens=50, output_tokens=20, cache_read_input_tokens=10),
+        usage=FakeUsage(input_tokens=50, output_tokens=20, cache_read_input_tokens=10,
+                       cache_creation_input_tokens=15),
         stop_reason="tool_use",
         model="claude-opus-5",
     )
@@ -199,6 +201,7 @@ async def test_streamed_round_trip(monkeypatch):
     turn = next(p for k, p in received if k == "done")
     assert turn.text == "Hello world"
     assert turn.prompt_tokens == 50 and turn.completion_tokens == 20 and turn.cached_tokens == 10
+    assert turn.cache_creation_tokens == 15
     assert turn.finish_reason == "tool_calls"
     assert turn.model == "claude-opus-5"
     assert turn.thinking == [{"type": "thinking", "thinking": "reasoning...", "signature": "sig-abc"}]
@@ -210,9 +213,46 @@ async def test_streamed_round_trip(monkeypatch):
     assert kwargs["output_config"] == {"effort": "high"}
     assert kwargs["thinking"] == {"type": "adaptive"}
     assert kwargs["system"] == [{"type": "text", "text": "be terse",
-                                 "cache_control": {"type": "ephemeral"}}]
+                                 "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
     last_block = kwargs["messages"][-1]["content"][-1]
     assert last_block["cache_control"] == {"type": "ephemeral"}
+
+
+# ---- system prompt cache-block split (stable/volatile) ---------------------------
+
+def test_system_without_volatile_marker_is_a_single_cached_block():
+    blocks = llm._anthropic_system_blocks("be terse")
+    assert blocks == [{"type": "text", "text": "be terse",
+                       "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+
+
+def test_system_with_volatile_marker_splits_into_two_blocks():
+    text = "stable persona and tool conventions" + "\n<!-- volatile -->\n" + "session-specific memory notes"
+    blocks = llm._anthropic_system_blocks(text)
+    assert blocks == [
+        {"type": "text", "text": "stable persona and tool conventions",
+         "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        {"type": "text", "text": "session-specific memory notes"},
+    ]
+    assert "cache_control" not in blocks[1]
+
+
+@pytest.mark.asyncio
+async def test_stream_sends_split_system_blocks(monkeypatch):
+    role = make_role()
+    fake_client = make_fake_client()
+    monkeypatch.setitem(llm._anthropic_clients, role.provider.name, fake_client)
+
+    system = "stable core" + "\n<!-- volatile -->\n" + "volatile tail"
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": "hi"}]
+    async for _ in llm.stream(role, messages):
+        pass
+
+    kwargs = fake_client.beta.messages.last_kwargs
+    assert kwargs["system"] == [
+        {"type": "text", "text": "stable core", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+        {"type": "text", "text": "volatile tail"},
+    ]
 
 
 @pytest.mark.asyncio

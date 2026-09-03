@@ -71,3 +71,27 @@ def test_render_tool_start_indents_when_subagent_id_set(isolate_console):
     plain.render(ev)
     out = isolate_console.getvalue()
     assert "grep" in out and "foo" in out and "fast" in out and "a1b2c3" in out
+
+
+def test_render_tool_start_does_not_repeat_the_tool_name(isolate_console):
+    ev = events.ToolStart(call_id="c1", name="bash", args_preview="bash  $ ls -la")
+    plain.render(ev)
+    out = isolate_console.getvalue()
+    assert out.count("bash") == 1
+
+
+def test_render_recall_outcome_prints_memory_count(isolate_console):
+    ev = events.ToolEnd(call_id="c1", name="recall", result_preview="ok",
+                        duration_s=0.1, offloaded=False, outcome="→ 2 memories")
+    plain.render(ev)
+    out = isolate_console.getvalue()
+    assert "2 memories" in out
+
+
+def test_render_error_shows_only_first_line_with_glyph(isolate_console):
+    ev = events.Error(message="FileNotFoundError: no such file\nfull traceback here")
+    plain.render(ev)
+    out = isolate_console.getvalue()
+    assert "FileNotFoundError: no such file" in out
+    assert "traceback" not in out
+    assert "✗" in out

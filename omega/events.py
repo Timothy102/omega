@@ -81,6 +81,15 @@ class Usage:
     completion_tokens: int
     used: int
     limit: int
+    cache_read: int = 0
+    cache_write: int = 0
+
+
+@dataclass(frozen=True)
+class Fallback:
+    from_model: str
+    to_model: str
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -96,4 +105,5 @@ class Phase:
 
 
 Event = (TextDelta | ToolStart | ToolEnd | Compacted | MemoryWrite |
-         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed | Phase)
+         MemoryConsolidated | SubagentSpawned | SubagentDone | Error | Done | Usage | ModelUsed | Phase |
+         Fallback)

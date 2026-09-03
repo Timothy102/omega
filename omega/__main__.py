@@ -2,7 +2,7 @@ import asyncio
 import sys
 from typing import Any
 
-from . import config, mcp, migrate, session, subagent, tools
+from . import config, mcp, migrate, session, skills, subagent, tools
 from .config import Config
 from .memory import consolidate
 from .ui import plain
@@ -12,6 +12,14 @@ console = plain.console
 
 async def main() -> None:
     argv = sys.argv[1:]
+    # `--help`/`-h`/`help` used to fall through every check below and run a
+    # real agent turn with the literal prompt "--help" -- handle them (and
+    # `--version`) before any other dispatch, config.load() included, so a
+    # broken or missing config never blocks either.
+    if argv and argv[0] in ("-h", "--help", "help"):
+        return console.print(_usage_text(), markup=False, highlight=False)
+    if argv and argv[0] == "--version":
+        return console.print(f"omega {_version()}")
     # Dispatch subcommands BEFORE config.load(): it exits when no API key is
     # set, which made `omega setup` -- the flow that sets the key -- unreachable.
     if argv and argv[0] == "setup":
@@ -47,8 +55,13 @@ async def main() -> None:
         return
     if argv and argv[0] == "models":
         return console.print(_render_models_table(config.load()))
+    if argv and argv[0] == "skills":
+        return _render_skills(argv[1:])
     if argv and argv[0] == "connections":
         return await _connections(argv[1:])
+    if argv and argv[0] == "eval":
+        from .eval import cli as eval_cli
+        return await eval_cli.main(argv[1:])
 
     # Parse every flag up front so order never matters.
     flags = {a for a in argv if a.startswith("-")}
@@ -73,6 +86,12 @@ async def main() -> None:
         argv = argv[:i] + argv[i + 2:]
     argv = [a for a in argv
             if a not in ("--mcp", "--yolo", "--plan", "-p", "--continue", "-c")]
+    # Anything else that still looks like a flag at the front is a typo, not a
+    # prompt -- silently absorbing it into `" ".join(argv)` is how `--help`
+    # ended up being sent to the model as literal text.
+    if argv and argv[0].startswith("-"):
+        console.print(f"[red]omega: unknown flag {argv[0]!r}[/red]")
+        return console.print(_usage_text(), markup=False, highlight=False)
 
     cfg = config.load()
     # First run (no config file) or an unusable `main` role: config.load()
@@ -163,6 +182,41 @@ async def main() -> None:
     console.print("[dim]omega: no prompt given and not an interactive terminal[/dim]")
 
 
+def _version() -> str:
+    import importlib.metadata
+    try:
+        return importlib.metadata.version("omega-code")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0-dev"
+
+
+def _usage_text() -> str:
+    return (
+        "omega -- a fast, small coding agent for your terminal\n\n"
+        "usage:\n"
+        "  omega [prompt] [flags]           one-shot, or bare for the interactive TUI\n"
+        "  omega <subcommand> [args]\n\n"
+        "subcommands:\n"
+        "  sessions                list saved sessions\n"
+        "  models                   show the model catalog and role defaults\n"
+        "  skills                   list available skills\n"
+        "  memory gc                consolidate memory now\n"
+        "  connections [...]        manage MCP servers\n"
+        "  eval [...]               run the eval harness (see `omega eval --help`)\n"
+        "  setup                    browser-based setup wizard\n"
+        "  onboard                  terminal setup wizard\n\n"
+        "flags:\n"
+        "  --plan, -p               read-only planning mode\n"
+        "  --model <alias>          override the model for this session\n"
+        "  --continue, -c           resume this directory's last session\n"
+        "  --resume <id>            resume a specific session (id prefix works)\n"
+        "  --yolo                   skip permission prompts\n"
+        "  --mcp                    connect all MCP servers eagerly at startup\n"
+        "  --version                print the version and exit\n"
+        "  -h, --help, help         show this message"
+    )
+
+
 def _render_models_table(cfg: Config) -> str:
     role_defaults: dict[str, list[str]] = {}
     for role_name, role in cfg.roles.items():
@@ -176,6 +230,25 @@ def _render_models_table(cfg: Config) -> str:
         lines.append(f"{alias:<10}{m.model:<26}{m.provider:<16}{m.context:>10,}"
                      f"{m.effort or '-':>8}  {roles}")
     return "\n".join(lines)
+
+
+def _render_skills(argv: list[str]) -> None:
+    from rich.table import Table
+
+    if argv and argv[0] == "show":
+        if len(argv) < 2:
+            return console.print("[red]usage: omega skills show <name>[/red]")
+        body = skills.load_body(argv[1])
+        if body is None:
+            return console.print(f"[red]no skill named {argv[1]!r}[/red]")
+        return console.print(body)
+
+    table = Table(box=None)
+    for col in ("NAME", "SOURCE", "DESCRIPTION"):
+        table.add_column(col)
+    for s in skills.catalog():
+        table.add_row(s.name, s.source, s.description)
+    console.print(table)
 
 
 def _fmt_last_used(ts: float | None) -> str:

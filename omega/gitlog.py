@@ -4,6 +4,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 _SKIP_DIRS = {"node_modules", ".venv"}
 _UNIT_SEP = "\x1f"
@@ -24,6 +25,14 @@ class Commit:
     author: str
     age: str
     subject: str
+
+
+@dataclass(frozen=True)
+class Change:
+    path: str
+    status: Literal["M", "A", "D", "R", "?"]
+    added: int
+    removed: int
 
 
 def _run(repo_path: Path, args: list[str]) -> str | None:
@@ -140,9 +149,81 @@ def recent_commits(repo: Repo, limit: int = 20) -> list[Commit]:
     return commits
 
 
+def _numstat_counts(repo_path: Path) -> dict[str, tuple[int, int]]:
+    out = _run(repo_path, ["diff", "--numstat", "HEAD"])
+    if not out:
+        return {}
+    counts: dict[str, tuple[int, int]] = {}
+    for line in out.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3:
+            continue
+        added_s, removed_s, path = fields
+        try:
+            counts[path] = (int(added_s), int(removed_s))
+        except ValueError:
+            continue
+    return counts
+
+
+def working_tree(repo: Repo) -> list[Change]:
+    if shutil.which("git") is None:
+        return []
+    out = _run(repo.path, ["status", "--porcelain", "--untracked-files=normal"])
+    if not out:
+        return []
+
+    numstat = _numstat_counts(repo.path)
+    changes: list[Change] = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        xy = line[:2]
+        path = line[3:]
+        if xy == "??":
+            changes.append(Change(path=path, status="?", added=0, removed=0))
+        elif "R" in xy:
+            changes.append(Change(path=path.split(" -> ", 1)[-1], status="R", added=0, removed=0))
+        elif "A" in xy:
+            added, removed = numstat.get(path, (0, 0))
+            changes.append(Change(path=path, status="A", added=added, removed=removed))
+        elif "D" in xy:
+            changes.append(Change(path=path, status="D", added=0, removed=0))
+        elif "M" in xy:
+            added, removed = numstat.get(path, (0, 0))
+            changes.append(Change(path=path, status="M", added=added, removed=removed))
+
+    return sorted(changes, key=lambda c: c.path)
+
+
+def diff(repo: Repo, path: str) -> str:
+    out = _run(repo.path, ["diff", "HEAD", "--", path])
+    if out:
+        return out
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.quotepath=off", "diff", "--no-index", "--", "/dev/null", path],
+            cwd=repo.path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout or ""
+
+
 async def discover_repos_async(root: Path, max_depth: int = 2) -> list[Repo]:
     return await asyncio.to_thread(discover_repos, root, max_depth)
 
 
 async def recent_commits_async(repo: Repo, limit: int = 20) -> list[Commit]:
     return await asyncio.to_thread(recent_commits, repo, limit)
+
+
+async def working_tree_async(repo: Repo) -> list[Change]:
+    return await asyncio.to_thread(working_tree, repo)
+
+
+async def diff_async(repo: Repo, path: str) -> str:
+    return await asyncio.to_thread(diff, repo, path)

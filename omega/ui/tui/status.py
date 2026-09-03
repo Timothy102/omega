@@ -1,4 +1,6 @@
-"""The single-line status bar above the input."""
+"""The chrome line below the input: status cells folded in with the key
+hints, per the reference terminal-agent layout (Part R7) -- there is no
+separate status bar above the input any more."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +8,7 @@ from dataclasses import dataclass
 from textual.widgets import Static
 
 from ... import events
+from .. import format as ui_format
 
 # Advanced every 80ms via `set_interval` while the turn is not idle.
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -34,17 +37,23 @@ def _fmt_usage(usage: events.Usage | None) -> str:
     return f"{_fmt_tokens(usage.used)}/{_fmt_tokens(usage.limit)} ({pct:.0f}%)"
 
 
-def phase_indicator(phase: str, frame: int) -> str:
-    if phase == "idle" or not phase:
-        return "[dim]●[/dim]"
-    glyph = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
-    return f"[dim]{glyph} {phase}[/dim]"
+def _fmt_cache(usage: events.Usage | None) -> str:
+    """`cache 87%` = cache_read / prompt_tokens for the last turn -- omitted
+    entirely (not just zeroed) when there was nothing to read from cache."""
+    if usage is None or usage.cache_read <= 0 or usage.prompt_tokens <= 0:
+        return ""
+    pct = usage.cache_read / usage.prompt_tokens * 100
+    return f" · [dim]cache {pct:.0f}%[/dim]"
+
+
+HINT_TEXT = "ctrl+b panel · ctrl+o model · /help · ctrl+c cancel"
 
 
 def format_status(state: StatusState, *, width: int | None = None) -> str:
     tokens = _fmt_usage(state.usage)
+    cache = _fmt_cache(state.usage)
     model = f"{state.alias} · {state.model}" if state.alias else state.model
-    head = f" {state.mode} · {model} · tokens {tokens}"
+    head = f" {state.mode} · {model} · tokens {tokens}{cache}"
     full = f"{head} · {state.session_id} · turns {state.turns}"
     if width is None or len(full) <= width:
         return full
@@ -55,15 +64,18 @@ def format_status(state: StatusState, *, width: int | None = None) -> str:
         return no_session
     if len(head) <= width:
         return head
-    alias_only = f" {state.mode} · {state.alias or state.model} · tokens {tokens}"
+    alias_only = f" {state.mode} · {state.alias or state.model} · tokens {tokens}{cache}"
     return alias_only if len(alias_only) <= width else alias_only[:width]
 
 
 class StatusBar(Static):
+    """One dim chrome line: status cells on the left, key hints on the
+    right -- the live phase/spinner now lives in the transcript's own
+    running-turn line (Part R5), not duplicated here."""
+
     DEFAULT_CSS = """
     StatusBar {
         height: 1;
-        background: $boost;
         color: $text-muted;
         padding: 0 1;
     }
@@ -72,15 +84,6 @@ class StatusBar(Static):
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._state: StatusState | None = None
-        self._frame = 0
-
-    def on_mount(self) -> None:
-        self.set_interval(0.08, self._tick)
-
-    def _tick(self) -> None:
-        if self._state is not None and self._state.phase != "idle":
-            self._frame += 1
-            self._repaint()
 
     def set_state(self, state: StatusState) -> None:
         self._state = state
@@ -89,6 +92,12 @@ class StatusBar(Static):
     def _repaint(self) -> None:
         if self._state is None:
             return
-        width = self.size.width or None
-        body = format_status(self._state, width=width - 12 if width else None)
-        self.update(f"{phase_indicator(self._state.phase, self._frame)} {body}")
+        width = self.size.width or 78
+        full = format_status(self._state, width=None).strip()
+        # The status cells always win the space fight -- the hint text is a
+        # nice-to-have that only shows up once there's room left over for it.
+        if ui_format.visible_len(full) + len(HINT_TEXT) + 3 <= width:
+            self.update(ui_format.right_align(f"[dim]{full}[/dim]", f"[dim]{HINT_TEXT}[/dim]", width))
+            return
+        narrowed = format_status(self._state, width=width).strip()
+        self.update(f"[dim]{narrowed}[/dim]")

@@ -6,16 +6,19 @@ from __future__ import annotations
 import asyncio
 import difflib
 import time
+from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Input
+from textual.timer import Timer
+from textual.widgets import Input, Static
 from textual.worker import Worker
 
-from ... import config, events, loop, session
+from ... import config, events, gitlog, loop, session
 from ...memory import consolidate
+from .. import format
 from . import prefs
 from .history import InputHistory
 from .modals import AskUserScreen, ConfirmScreen, ModelPickerScreen
@@ -23,35 +26,57 @@ from .sidebar import Sidebar
 from .status import StatusBar, StatusState
 from .transcript import Transcript
 
-_MODE_ROLE = {"build": "main", "plan": "plan"}
+_MODE_ROLE = {"build": "main", "plan": "plan", "discuss": "discuss"}
+_MODE_TAG_STYLE = {"build": "dim", "plan": "yellow", "discuss": "$accent"}
 
-_COMMANDS = ["/plan", "/build", "/mode", "/memory-gc", "/model", "/sidebar", "/help", "/quit"]
+_COMMANDS = ["/plan", "/build", "/discuss", "/mode", "/memory-gc", "/model", "/sidebar", "/help", "/quit"]
 
 _HELP_TEXT = (
     "ctrl+c cancel turn  ·  ctrl+o /model switch model  ·  ctrl+b toggle side panel\n"
     "ctrl+1/2/3 or [ ] switch side-panel tab  ·  up/down input history\n"
-    "/plan /build switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  /memory-gc  ·  /quit")
+    "/plan /build /discuss switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  /memory-gc  ·  /quit")
+
+# Git branch per cwd, cached for the life of the process and refreshed
+# explicitly at turn end -- a `git symbolic-ref` per header repaint would be
+# wasteful for something that only ever changes between turns.
+_branch_cache: dict[str, str] = {}
 
 
-def _relative_age(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    minutes = seconds / 60
-    if minutes < 60:
-        return f"{int(minutes)}m"
-    hours = minutes / 60
-    if hours < 24:
-        return f"{int(hours)}h"
-    return f"{int(hours / 24)}d"
+async def _lookup_branch(cwd: str) -> str:
+    path = Path(cwd)
+    for d in (path, *path.parents):
+        if (d / ".git").exists():
+            return await asyncio.to_thread(gitlog._branch, d)
+    return ""
+
+
+class HeaderBar(Static):
+    """The top chrome line: wordmark, cwd, git branch, session id -- all dim
+    but the wordmark (Part R9)."""
+
+    DEFAULT_CSS = """
+    HeaderBar { height: 1; color: $text-muted; padding: 0 1; }
+    """
+
+    def set_state(self, cwd: str, branch: str, session_id: str) -> None:
+        bits = [format.abbrev_cwd(cwd)]
+        if branch:
+            bits.append(branch)
+        bits.append(session_id)
+        self.update(f"[bold]⌘ omega[/bold]  [dim]{' · '.join(bits)}[/dim]")
 
 
 class OmegaApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
+    #header { height: 1; }
     #body { height: 1fr; }
-    #prompt { dock: bottom; }
+    #input-rule { height: 1; }
+    #input-row { height: 1; }
+    #prompt { width: 1fr; }
+    #mode-tag { width: auto; padding: 0 1; }
     #prompt.-plan-mode { color: $warning; }
+    #prompt.-discuss-mode { color: $accent; }
     """
     BINDINGS = [
         Binding("ctrl+c", "interrupt", "Cancel turn", show=False, priority=True),
@@ -87,13 +112,18 @@ class OmegaApp(App[None]):
         self._prefs = prefs.load()
         self._first_launch = not prefs.PATH.exists()
         self._sidebar_visible = bool(self._prefs.get("sidebar", False))
+        self._git_refresh_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
+        yield HeaderBar(id="header")
         with Horizontal(id="body"):
             yield Transcript(id="transcript")
             yield Sidebar(self.sess, id="sidebar")
+        yield Static("", id="input-rule")
+        with Horizontal(id="input-row"):
+            yield Input(id="prompt", placeholder="❯ ", compact=True)
+            yield Static("", id="mode-tag")
         yield StatusBar(id="status")
-        yield Input(id="prompt", placeholder=f"{self.mode}› ")
 
     def on_mount(self) -> None:
         # Deferred import: reads the CURRENT `omega.ui.tui.HISTORY`, so tests
@@ -104,10 +134,12 @@ class OmegaApp(App[None]):
         self.query_one(Transcript).set_session(self.sess.id)
         self._refresh_status()
         self._apply_mode_style()
+        self._update_input_rule()
+        self._refresh_header()
         if self.history:
             self._show_resumed()
-        if self._first_launch:
-            self.query_one(Transcript).add_dim("ctrl+b toggles the side panel")
+        else:
+            self.query_one(Transcript).show_empty_state()
         self.set_focus(self.query_one("#prompt", Input))
 
     def _show_resumed(self) -> None:
@@ -115,16 +147,36 @@ class OmegaApp(App[None]):
         if hist and str(hist[-1].get("content", "")).startswith(session.RESUME_PREFIX):
             hist = hist[:-1]
         turns = sum(1 for m in hist if m.get("role") == "user")
-        ago = _relative_age(time.time() - self.sess.updated) if self.sess.updated else ""
+        ago = format.relative_age(time.time() - self.sess.updated) if self.sess.updated else ""
         self.query_one(Transcript).add_resumed(self.sess.id, turns, len(hist), self.sess.cwd, ago)
+
+    def _update_input_rule(self) -> None:
+        rule = self.query_one("#input-rule", Static)
+        basename = Path(self.sess.cwd).name or self.sess.cwd
+        width = rule.size.width or 78
+        bar = "─" * max(1, width - len(basename) - 1)
+        rule.update(f"[dim]{bar} {basename}[/dim]")
+
+    def _refresh_header(self, *, force: bool = False) -> None:
+        self.run_worker(self._load_header(force=force), exclusive=False, thread=False)
+
+    async def _load_header(self, *, force: bool) -> None:
+        cwd = self.sess.cwd
+        branch = None if force else _branch_cache.get(cwd)
+        if branch is None:
+            branch = await _lookup_branch(cwd)
+            _branch_cache[cwd] = branch
+        self.query_one(HeaderBar).set_state(cwd, branch, self.sess.id)
 
     def _role_name(self) -> str:
         return _MODE_ROLE.get(self.mode, "main")
 
     def _apply_mode_style(self) -> None:
         prompt = self.query_one("#prompt", Input)
-        prompt.placeholder = f"{self.mode}› "
         prompt.set_class(self.mode == "plan", "-plan-mode")
+        prompt.set_class(self.mode == "discuss", "-discuss-mode")
+        style = _MODE_TAG_STYLE.get(self.mode, "dim")
+        self.query_one("#mode-tag", Static).update(f"[{style}]{self.mode}[/{style}]")
 
     def _refresh_status(self) -> None:
         role_name = self._role_name()
@@ -143,6 +195,15 @@ class OmegaApp(App[None]):
                             phase=self._phase)
         self.query_one(StatusBar).set_state(state)
 
+    def _schedule_git_refresh(self) -> None:
+        if self._git_refresh_timer is not None:
+            self._git_refresh_timer.stop()
+        self._git_refresh_timer = self.set_timer(0.3, self._run_git_refresh)
+
+    def _run_git_refresh(self) -> None:
+        self._git_refresh_timer = None
+        self.query_one(Sidebar).git_tab.refresh_repos()
+
     def emit(self, ev: events.Event) -> None:
         transcript = self.query_one(Transcript)
         sidebar = self.query_one(Sidebar)
@@ -156,9 +217,15 @@ class OmegaApp(App[None]):
             case events.ToolStart():
                 transcript.add_tool_start(ev)
                 sidebar.session_tab.record_tool_start(ev)
+                if ev.name in ("find_tools", "call_tool"):
+                    sidebar.connections_tab.refresh_status()
             case events.ToolEnd():
                 transcript.add_tool_end(ev)
                 sidebar.session_tab.record_tool_end(ev)
+                if ev.name in ("write", "edit", "bash"):
+                    self._schedule_git_refresh()
+                if ev.name in ("find_tools", "call_tool"):
+                    sidebar.connections_tab.refresh_status()
             case events.SubagentSpawned():
                 transcript.add_subagent_spawned(ev)
                 sidebar.session_tab.record_subagent_spawned(ev)
@@ -178,6 +245,7 @@ class OmegaApp(App[None]):
             case events.Usage():
                 self._usage = ev
                 sidebar.session_tab.record_usage(ev)
+                transcript.note_usage(ev)
                 self._refresh_status()
             case events.ModelUsed(alias=alias, model=model):
                 self._last_model = (alias, model)
@@ -208,8 +276,12 @@ class OmegaApp(App[None]):
 
     def _handle_command(self, text: str) -> None:
         transcript = self.query_one(Transcript)
-        if text in ("/plan", "/build"):
-            self.mode = text[1:]
+        if text in ("/plan", "/build", "/discuss"):
+            new_mode = text[1:]
+            if new_mode == "discuss" and "discuss" not in loop.MODES:
+                transcript.add_dim("discuss mode not available in this build")
+                return
+            self.mode = new_mode
             transcript.add_mode_switch(self.mode)
             self._apply_mode_style()
             self._refresh_status()
@@ -301,6 +373,13 @@ class OmegaApp(App[None]):
                 self.query_one(Transcript).add_error(events.Error(f"could not save session: {e}"))
             self._turn_worker = None
             self.emit(events.Phase("idle"))
+            if self._git_refresh_timer is not None:
+                self._git_refresh_timer.stop()
+                self._git_refresh_timer = None
+            sidebar = self.query_one(Sidebar)
+            sidebar.git_tab.refresh_repos()
+            sidebar.connections_tab.refresh_status()
+            self._refresh_header(force=True)
             prompt = self.query_one("#prompt", Input)
             prompt.disabled = False
             self.set_focus(prompt)

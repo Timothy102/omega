@@ -1,13 +1,24 @@
 import json
 from typing import cast
 
-from . import llm
+from . import llm, trajectory
 from .config import Config
 from .llm import Turn
 from .session import Message
 
 FRACTION = 0.75
 KEEP_LAST = 6
+
+# Cap on what the summariser LLM ever sees: the transcript already truncates
+# each message to 1500 chars, but a long-running turn can still pile up far
+# more messages than that keeps sane for one summarisation call.
+_COMPACT_SUMMARY_INPUT_CHARS = 40_000
+
+# Per-line cap for the deterministic ledger appended alongside the LLM
+# summary -- generous compared to the live trajectory block's 64/120 char
+# fields, since this is the durable record of a range that is about to be
+# dropped from history for good.
+_COMPACT_ENTRY_CHARS = 1000
 
 SYSTEM = """Summarise this conversation excerpt for an agent that will keep working.
 
@@ -57,7 +68,7 @@ async def maybe_compact(cfg: Config, history: list[Message], used: int, limit: i
     older, recent = history[:cut], history[cut:]
     transcript = "\n\n".join(
         f"[{m.get('role')}] {str(m.get('content'))[:1500]}" for m in older
-        if m.get("content"))
+        if m.get("content"))[:_COMPACT_SUMMARY_INPUT_CHARS]
 
     role = cfg.role("compact") if "compact" in cfg.roles else cfg.role("main")
     summary = ""
@@ -80,7 +91,16 @@ async def maybe_compact(cfg: Config, history: list[Message], used: int, limit: i
     for m in recent:
         m.pop("thinking", None)
 
-    history[:] = [{"role": "user",
-                   "content": f"[Summary of earlier conversation]\n{summary}"},
-                  *recent]
+    ledger_lines = trajectory.compaction_lines(older, _COMPACT_ENTRY_CHARS)
+    ledger_body = "\n".join(ledger_lines) if ledger_lines else "(no tool calls in this range)"
+
+    # The ledger is its own message, never folded into the summary message
+    # above: mutating an already-emitted message's content would invalidate
+    # the Anthropic prompt cache for everything after it, while appending a
+    # brand-new message only ever extends the cached prefix.
+    history[:] = [
+        {"role": "user", "content": f"[Summary of earlier conversation]\n{summary}"},
+        {"role": "user", "content": f"[Action ledger for dropped range]\n{ledger_body}"},
+        *recent,
+    ]
     return f"compacted {len(older)} messages → summary"

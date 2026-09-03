@@ -1,0 +1,11 @@
+name: plan-version-flag
+prompt: >
+  Investigate omega's CLI entry point (omega/__main__.py) and produce a plan
+  for adding a `--version` flag that prints the installed package version.
+  Name every real file you would touch and the exact function or block
+  you would change in each. Do not write any code -- you are read-only.
+repo: .
+check: "grep -q 'omega/__main__.py' TRANSCRIPT.md"
+timeout_s: 300
+mode: plan
+tags: [planning]

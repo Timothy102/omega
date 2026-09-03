@@ -1,23 +1,69 @@
+import asyncio
 import json
-from collections.abc import AsyncIterator
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import anthropic
+import openai
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from .config import Role
 from .session import Message
 
-PhaseState = Literal["thinking", "streaming"]
+PhaseState = Literal["waiting", "thinking", "streaming"]
+FallbackInfo = tuple[str, str, str]
 StreamEvent = (tuple[Literal["text"], str] | tuple[Literal["tool"], "ToolCall"]
-              | tuple[Literal["done"], "Turn"] | tuple[Literal["phase"], PhaseState])
+              | tuple[Literal["done"], "Turn"] | tuple[Literal["phase"], PhaseState]
+              | tuple[Literal["fallback"], FallbackInfo])
 
 # The array-form fallback header would also work, but the scalar "default" mode
 # picks Anthropic's recommended fallback per refusal category instead of
 # pinning one model -- see shared/model-migration.md -> New API features.
 _ANTHROPIC_BETAS = ["server-side-fallback-2026-07-01"]
 _ANTHROPIC_MAX_TOKENS = 64000
+_VOLATILE_MARKER = "\n<!-- volatile -->\n"
+
+# Retry ladder shared by both backends: retried only while no output has
+# reached the caller yet -- a mid-stream failure must surface as an error,
+# never silently restart and duplicate what was already emitted.
+LLM_MAX_ATTEMPTS = 3
+LLM_RETRY_BASE_DELAY = 1.0
+_RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+_RETRYABLE_EXC = (openai.APIStatusError, openai.APIConnectionError,
+                  anthropic.APIStatusError, anthropic.APIConnectionError)
+# Swapped out by tests to avoid real waits; production code must not call
+# asyncio.sleep directly so a monkeypatch here covers both backends.
+_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
+        return exc.status_code in _RETRYABLE_STATUS
+    # APIConnectionError (incl. APITimeoutError, its subclass in both SDKs)
+    # never carries a status code -- network/timeout failures are always
+    # worth a retry.
+    return isinstance(exc, (openai.APIConnectionError, anthropic.APIConnectionError))
+
+
+def _retry_delay(attempt: int, exc: BaseException) -> float:
+    if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
+        retry_after = exc.response.headers.get("retry-after")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+    base = LLM_RETRY_BASE_DELAY * (2.0 ** (attempt - 1))
+    return base + random.uniform(0, base * 0.5)
+
+
+def _fallback_reason(exc: BaseException) -> str:
+    if isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
+        return f"HTTP {exc.status_code}"
+    return type(exc).__name__
 
 
 @dataclass
@@ -41,6 +87,7 @@ class Turn:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
+    cache_creation_tokens: int = 0
     thinking: list[dict[str, Any]] = field(default_factory=list)
     model: str = ""
 
@@ -80,8 +127,44 @@ def _anthropic_client_for(role: Role) -> AsyncAnthropic:
     return _anthropic_clients[p.name]
 
 
+def _backend_for(role: Role) -> Callable[[Role, list[Message], list[dict[str, Any]] | None],
+                                          AsyncIterator[StreamEvent]]:
+    return _stream_anthropic if getattr(role.provider, "type", "openai") == "anthropic" else _stream_openai
+
+
+async def _stream_with_retries(role: Role, messages: list[Message],
+                               tools: list[dict[str, Any]] | None) -> AsyncIterator[StreamEvent]:
+    """The retry ladder for one role/backend: up to `LLM_MAX_ATTEMPTS` tries,
+    exponential backoff with jitter (honoring `retry-after` when present), on
+    HTTP 408/409/429/500/502/503/504/529 and connection/timeout errors.
+
+    Retried only while this attempt produced no `text`/`tool` output yet --
+    once the caller has seen output, a failure must propagate as an error
+    rather than silently restart and duplicate it.
+    """
+    backend = _backend_for(role)
+    last_exc: BaseException | None = None
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        yielded = False
+        try:
+            async for ev in backend(role, messages, tools):
+                if ev[0] in ("text", "tool"):
+                    yielded = True
+                yield ev
+            return
+        except _RETRYABLE_EXC as exc:
+            if yielded or attempt == LLM_MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+            last_exc = exc
+            yield "phase", "waiting"
+            await _sleep(_retry_delay(attempt, exc))
+    if last_exc is not None:
+        raise last_exc
+
+
 async def stream(role: Role, messages: list[Message],
-                 tools: list[dict[str, Any]] | None = None) -> AsyncIterator[StreamEvent]:
+                 tools: list[dict[str, Any]] | None = None,
+                 fallback: Role | None = None) -> AsyncIterator[StreamEvent]:
     """Yield ('text', delta) and ('tool', ToolCall) events.
 
     A tool call is emitted the moment its arguments are known to be complete --
@@ -91,13 +174,27 @@ async def stream(role: Role, messages: list[Message],
     Dispatches to the OpenAI-compatible or native Anthropic backend based on
     `role.provider.type` (defaults to "openai" for callers -- tests included --
     that build a bare provider stand-in without a `type` attribute).
+
+    Wraps the call in a retry ladder (see `_stream_with_retries`); if it is
+    exhausted -- or the failure isn't retryable at all -- and `fallback` is
+    given, retries the whole thing against the fallback role (with its own
+    retry ladder), announced via a `("fallback", (from, to, reason))` event.
+    Falls back only when nothing has reached the caller yet, for the same
+    no-duplicate-output reason the retry ladder itself stops retrying.
     """
-    if getattr(role.provider, "type", "openai") == "anthropic":
-        async for ev in _stream_anthropic(role, messages, tools):
+    any_output = False
+    try:
+        async for ev in _stream_with_retries(role, messages, tools):
+            if ev[0] in ("text", "tool"):
+                any_output = True
             yield ev
-        return
-    async for ev in _stream_openai(role, messages, tools):
-        yield ev
+    except _RETRYABLE_EXC as exc:
+        if any_output or fallback is None:
+            raise
+        yield "phase", "waiting"
+        yield "fallback", (role.model, fallback.model, _fallback_reason(exc))
+        async for ev in _stream_with_retries(fallback, messages, tools):
+            yield ev
 
 
 async def _stream_openai(role: Role, messages: list[Message],
@@ -239,6 +336,22 @@ def _anthropic_history(history: list[Message], role: Role) -> list[dict[str, Any
     return out
 
 
+def _anthropic_system_blocks(system_text: str) -> list[dict[str, Any]]:
+    """Split on the stable/volatile marker `loop.py` renders the system prompt
+    with. The stable prefix (persona, tool-use conventions -- identical every
+    turn) gets the long-lived breakpoint; the volatile tail (memory snapshot,
+    per-session notes) is a separate, uncached block so editing it never
+    invalidates the expensive stable prefix. Render order is tools -> system
+    -> messages, so tool schemas sit ahead of this and are cached for free.
+    """
+    stable, _, volatile = system_text.partition(_VOLATILE_MARKER)
+    blocks = [{"type": "text", "text": stable,
+              "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
+    if volatile:
+        blocks.append({"type": "text", "text": volatile})
+    return blocks
+
+
 async def _stream_anthropic(role: Role, messages: list[Message],
                             tools: list[dict[str, Any]] | None) -> AsyncIterator[StreamEvent]:
     system_text = str(messages[0].get("content") or "") if messages and messages[0].get("role") == "system" else ""
@@ -253,7 +366,7 @@ async def _stream_anthropic(role: Role, messages: list[Message],
     kwargs: dict[str, Any] = {
         "model": role.model,
         "max_tokens": _ANTHROPIC_MAX_TOKENS,
-        "system": [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
+        "system": _anthropic_system_blocks(system_text),
         "messages": anth_messages,
         "betas": _ANTHROPIC_BETAS,
         "fallbacks": "default",
@@ -309,6 +422,7 @@ async def _stream_anthropic(role: Role, messages: list[Message],
     turn.prompt_tokens = final.usage.input_tokens
     turn.completion_tokens = final.usage.output_tokens
     turn.cached_tokens = final.usage.cache_read_input_tokens or 0
+    turn.cache_creation_tokens = getattr(final.usage, "cache_creation_input_tokens", 0) or 0
     turn.thinking = [b.model_dump() for b in final.content if b.type in ("thinking", "redacted_thinking")]
 
     if final.stop_reason == "max_tokens":

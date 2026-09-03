@@ -34,6 +34,20 @@ REGISTRY: dict[str, ToolEntry] = {}
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _OFFLOAD_RE = re.compile(r"saved as artifact ([0-9a-f]{8})")
 
+# Hard cap on any string that re-enters the model's context through tools.run
+# (a plain result, an offload preview, or a fetch_result page) -- independent
+# of whether it was offloaded, so a huge `limit` on fetch_result can't defeat
+# it either.
+MAX_INLINE_CHARS = 24_000
+
+# Total chars written to artifacts this turn (a "turn" = one run_turn call,
+# spanning every round and every subagent dispatched within it). Once this is
+# exceeded, further large results skip offload entirely -- an artifact this
+# session can no longer read back in full is worse than a longer inline
+# truncation.
+TURN_RESULT_BUDGET_CHARS = 2_000_000
+_turn_chars_stored = 0
+
 # Set by the CLI. None means no prompting (scripted / --yolo).
 CONFIRM: Callable[[str, ToolArgs, str], Awaitable[bool]] | None = None
 _confirm_lock = asyncio.Lock()
@@ -50,6 +64,21 @@ ASK_USER: Callable[[str, list[Option], bool], Awaitable[str]] | None = None
 def set_tainted(value: bool) -> None:
     global TAINTED
     TAINTED = value
+
+
+def reset_turn_budget() -> None:
+    """Called once at the start of every `run_turn` -- the budget is per
+    user-visible turn, shared across every round and subagent within it."""
+    global _turn_chars_stored
+    _turn_chars_stored = 0
+
+
+def _cap_inline(text: str) -> str:
+    if len(text) <= MAX_INLINE_CHARS:
+        return text
+    marker = (f"\n[inline result capped at {MAX_INLINE_CHARS} chars; narrow "
+              f"the query or page with offset/limit for more]")
+    return text[:MAX_INLINE_CHARS - len(marker)] + marker
 
 
 def offload_info(result: str) -> tuple[bool, str | None]:
@@ -89,7 +118,7 @@ def tool(name: str, description: str, params: dict[str, Any], required: list[str
 
 
 READ_ONLY = {"read", "grep", "glob", "recall", "subagent", "find_tools", "call_tool",
-             "fetch_result", "list_artifacts", "ask_user"}
+             "fetch_result", "list_artifacts", "ask_user", "skill"}
 
 # Tiny confirmations, or themselves the retrieval path -- offloading
 # fetch_result's own output would be an infinite regress.
@@ -267,9 +296,18 @@ async def run(call: ToolCall, allowed: set[str] | None = None) -> str:
 
     result = cast(str, result)
     if call.name in _NO_OFFLOAD or SESSION_ID is None:
-        return result
+        return _cap_inline(result)
+
     from . import artifacts
-    return artifacts.offload_if_large(result, SESSION_ID)
+    global _turn_chars_stored
+    if len(result) > artifacts.OFFLOAD_THRESHOLD:
+        if _turn_chars_stored >= TURN_RESULT_BUDGET_CHARS:
+            return _cap_inline(
+                f"{truncate(result)}\n"
+                f"[turn result budget of {TURN_RESULT_BUDGET_CHARS} chars "
+                f"exceeded; not offloaded to an artifact this turn]")
+        _turn_chars_stored += min(len(result), artifacts.RESULT_MAX_CHARS)
+    return _cap_inline(artifacts.offload_if_large(result, SESSION_ID))
 
 
 @tool("find_tools",
@@ -321,9 +359,9 @@ async def _call_tool(name: str, arguments: ToolArgs | None = None) -> str:
 
 
 @tool("ask_user",
-      "Ask the user a clarifying question when genuinely blocked on a "
-      "decision only they can make. Do not use it for things you can "
-      "investigate yourself.",
+      "The right tool for a design conversation -- batching 2-4 decisions "
+      "with options is expected before building anything non-trivial on an "
+      "open-ended request. Never use it for things you can look up yourself.",
       {"question": S, "header": S,
        "options": {"type": "array", "items": {"type": "object",
                     "properties": {"label": S, "description": S}}},
@@ -341,13 +379,18 @@ async def _ask_user(question: str, header: str = "", options: list[Option] | Non
 
 @tool("fetch_result",
       "Read more of a large tool result that was saved as an artifact -- "
-      "the id is in the `[full output: ... saved as artifact <id>]` footer.",
+      "the id is in the `[full output: ... saved as artifact <id>]` footer. "
+      "Each page ends with a trailer showing `next_offset` for the next call, "
+      "or `[end]`.",
       {"id": S, "offset": I, "limit": I}, ["id"])
-def _fetch_result(id: str, offset: int = 0, limit: int = 4000) -> str:
+def _fetch_result(id: str, offset: int = 0, limit: int = 0) -> str:
     if SESSION_ID is None:
         return "error: no active session"
     from . import artifacts
-    return artifacts.fetch(SESSION_ID, id, offset, limit)
+    # 0 means "not specified" -- the actual default (PAGE_CHARS) lives in
+    # artifacts.py, which tools.py cannot import at module scope (artifacts
+    # imports `truncate` from here, so a top-level cycle would deadlock init).
+    return artifacts.fetch(SESSION_ID, id, offset, limit or artifacts.PAGE_CHARS)
 
 
 @tool("list_artifacts",

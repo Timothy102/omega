@@ -1,0 +1,14 @@
+name: relative-age-negative-delta
+prompt: >
+  In omega/gitlog.py, `_relative_age(seconds)` clamps a negative delta to
+  zero with `max(0.0, seconds)`, which silently reports a commit timestamp
+  from the future as "0s ago" instead of surfacing the clock skew. Change it
+  to handle negative deltas explicitly (your choice of representation -- e.g.
+  a leading sign or "in the future"), and add a test in tests/test_gitlog.py
+  that pins the behavior you chose. Keep the rest of the function and the
+  existing tests in tests/test_gitlog.py passing.
+repo: .
+check: "uv run pytest tests/test_gitlog.py -q"
+timeout_s: 600
+mode: build
+tags: [regression, unit-test]

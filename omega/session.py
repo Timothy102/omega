@@ -25,6 +25,10 @@ class Session:
     history: list[Message] = field(default_factory=list)
     compactions: int = 0
     model_override: str | None = None
+    # Set by load() when the turn log (.jsonl) held more messages than the
+    # last saved .json -- i.e. the process crashed mid-turn. Never persisted:
+    # it describes this one load, not the session itself.
+    recovered: int = 0
 
     @classmethod
     def new(cls, cwd: str | None = None, mode: str = "build") -> "Session":
@@ -35,6 +39,17 @@ class Session:
     @property
     def path(self) -> Path:
         return DIR / f"{self.id}.json"
+
+    @property
+    def jsonl_path(self) -> Path:
+        return DIR / f"{self.id}.jsonl"
+
+    def append(self, msg: Message) -> None:
+        """Add one message to history AND durably log it immediately -- unlike
+        `save()` (a full rewrite that only happens at turn boundaries), this
+        makes a crash mid-turn resumable: see `load()`'s jsonl-vs-json check."""
+        self.history.append(msg)
+        log_message(self.id, msg)
 
     @property
     def turns(self) -> int:
@@ -50,8 +65,10 @@ class Session:
     def save(self) -> None:
         DIR.mkdir(parents=True, exist_ok=True)
         self.updated = time.time()
+        data = asdict(self)
+        data.pop("recovered", None)  # a fact about this load, not the session
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=1))
+        tmp.write_text(json.dumps(data, indent=1))
         tmp.replace(self.path)
 
     def close_turn(self, history: list[dict[str, Any]], mode: str, interrupted: bool) -> None:
@@ -62,7 +79,48 @@ class Session:
         if interrupted:
             history.append({"role": "user",
                             "content": "[previous turn interrupted by user]"})
+        self._sync_jsonl(history)
         self.save()
+
+    def _sync_jsonl(self, history: list[Message]) -> None:
+        """Nothing in this codebase yet calls `append()` per-message during a
+        turn, so bring the turn log up to date at the turn boundary instead --
+        the log is then complete as of every close_turn(), even before a
+        caller is wired to append() live. A no-op once the log has caught up."""
+        path = self.jsonl_path
+        existing = len(_read_jsonl(path)) if path.exists() else 0
+        if existing >= len(history):
+            return
+        DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".jsonl.tmp")
+        with tmp.open("w") as f:
+            for msg in history:
+                f.write(json.dumps(msg) + "\n")
+        tmp.replace(path)
+
+
+def log_message(session_id: str, msg: Message) -> None:
+    """Append one message to `<session_id>.jsonl` without needing a `Session`
+    object loaded -- the primitive `Session.append` builds on."""
+    DIR.mkdir(parents=True, exist_ok=True)
+    with (DIR / f"{session_id}.jsonl").open("a") as f:
+        f.write(json.dumps(msg) + "\n")
+
+
+def _read_jsonl(path: Path) -> list[Message]:
+    """Tolerates a truncated trailing line -- the shape a hard crash mid-write
+    leaves, since appends are not fsynced. Anything after the first bad line
+    is dropped rather than raising, since the log is append-only sequential."""
+    messages: list[Message] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            messages.append(json.loads(line))
+        except json.JSONDecodeError:
+            break
+    return messages
 
 
 def load(sid: str) -> Session:
@@ -75,6 +133,15 @@ def load(sid: str) -> Session:
     raw = json.loads(p.read_text())
     known = set(Session.__dataclass_fields__)
     sess = Session(**{k: v for k, v in raw.items() if k in known})
+    sess.recovered = 0
+
+    jsonl = DIR / f"{sess.id}.jsonl"
+    if jsonl.exists():
+        logged = _read_jsonl(jsonl)
+        if len(logged) > len(sess.history):
+            sess.recovered = len(logged) - len(sess.history)
+            sess.history = logged
+
     repair(sess.history)
     return sess
 

@@ -2,9 +2,13 @@
 `ui/format.py`, which both front ends share so they cannot drift on wording
 (plain.py's tests print through a live `rich.Console` and are left untouched).
 
-Tool-call lines fold their `ToolEnd` outcome in place instead of adding a
-second line, and a model round or subagent that dispatches more than a
-handful of tool calls collapses the rest behind a `… +N more` line."""
+Layout follows the reference terminal-agent look: each top-level block (user
+prompt, assistant reply, a burst of tool calls, a subagent) is separated from
+its neighbors by one blank line; a tool's outcome (or a subagent's nested
+calls) renders as a dim `└ ...` sub-line beneath its block instead of a second
+top-level line; and a single live status line docked to the bottom of the
+pane tracks the running turn (phase, elapsed time, tokens, thinking time)
+instead of per-row spinners."""
 from __future__ import annotations
 
 import time
@@ -12,8 +16,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from rich.markdown import Markdown
+from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.events import Click
+from textual.timer import Timer
 from textual.widgets import Static
 
 from ... import events
@@ -25,6 +31,7 @@ _GROUP_CAP = 3
 
 @dataclass
 class _Group:
+    is_sub: bool = False
     shown: int = 0
     total: int = 0
     hidden: list[events.ToolStart] = field(default_factory=list)
@@ -32,13 +39,61 @@ class _Group:
     expanded: bool = False
 
 
-class _MoreLine(Static):
+class _MoreLine(Static, can_focus=True):
+    """A collapsed-group continuation line. Real focusable row: enter or a
+    click expands it, same as any other interactive control."""
+
+    DEFAULT_CSS = """
+    _MoreLine { height: 1; }
+    _MoreLine:focus { text-style: underline; }
+    """
+    BINDINGS = [Binding("enter", "activate", show=False)]
+
     def __init__(self, markup: str, on_click: Callable[[], None]) -> None:
         super().__init__(markup)
         self._click_cb = on_click
 
     def on_click(self, event: Click) -> None:
         self._click_cb()
+
+    def action_activate(self) -> None:
+        self._click_cb()
+
+
+class _EmptyState(Static):
+    DEFAULT_CSS = """
+    _EmptyState {
+        width: 100%;
+        height: auto;
+        content-align: center middle;
+        color: $text-muted;
+        padding: 2 0;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "[bold]⌘ omega[/bold]\n"
+            "[dim]ask anything about this repo · /discuss to think together · "
+            "/plan to plan[/dim]")
+
+
+class _PromptBand(Static):
+    """The turn-opening user-prompt row: a full-width subtle background band,
+    no border -- `add_user_message` builds the left/right-aligned text."""
+
+    DEFAULT_CSS = """
+    _PromptBand { width: 100%; background: $surface-lighten-1; padding: 0 2; }
+    """
+
+
+class _LiveStatus(Static):
+    """The single running-turn indicator, docked to the pane's bottom edge so
+    it always stays below newly streamed content regardless of mount order."""
+
+    DEFAULT_CSS = """
+    _LiveStatus { dock: bottom; width: 100%; height: 1; padding: 0 1; }
+    """
 
 
 class _NewOutputPill(Static):
@@ -78,14 +133,24 @@ class Transcript(VerticalScroll):
         self._live_text: str = ""
         self._session_id: str = ""
 
-        self._thinking_widget: Static | None = None
-        self._thinking_timer: object | None = None
-        self._thinking_frame = 0
+        self._empty_state: _EmptyState | None = None
+        self._last_block: str | None = None
+
+        # live status footer (Part R5)
+        self._status_widget: Static | None = None
+        self._status_timer: Timer | None = None
+        self._status_frame = 0
+        self._phase = "idle"
+        self._turn_started: float | None = None
+        self._thinking_seconds = 0.0
+        self._thinking_entered: float | None = None
+        self._active_tool_count = 0
+        self._last_usage: events.Usage | None = None
 
         self._top_group: _Group | None = None
         self._sub_groups: dict[str, _Group] = {}
         self._sub_spawn_widget: dict[str, Static] = {}
-        self._sub_spawn_base: dict[str, str] = {}
+        self._sub_task_text: dict[str, str] = {}
         self._sub_start_time: dict[str, float] = {}
         self._active_subagents: set[str] = set()
 
@@ -110,85 +175,175 @@ class Transcript(VerticalScroll):
         self.scroll_end(animate=False)
         self._pill.display = False
 
-    def _append(self, markup: str) -> Static:
+    def _mount_widget(self, widget: Static) -> Static:
         at_bottom = self.scroll_y >= self.max_scroll_y - 1
-        line = Static(markup)
-        self.mount(line)
+        self.mount(widget)
         if at_bottom:
             self.scroll_end(animate=False)
             self._pill.display = False
         else:
             self._pill.display = True
-        return line
+        return widget
 
-    # ---- thinking spinner (Part A5) ----------------------------------------
+    def _append(self, markup: str) -> Static:
+        return self._mount_widget(Static(markup))
 
-    def set_thinking(self, active: bool) -> None:
-        if active:
-            if self._thinking_widget is None:
-                self._thinking_frame = 0
-                self._thinking_widget = self._append(self._thinking_text())
-                self._thinking_timer = self.set_interval(0.08, self._tick_thinking)
-            return
-        if self._thinking_widget is not None:
-            self._thinking_widget.remove()
-            self._thinking_widget = None
-        if self._thinking_timer is not None:
-            self._thinking_timer.stop()  # type: ignore[attr-defined]
-            self._thinking_timer = None
+    def _ensure_gap(self, kind: str) -> None:
+        """One blank line between blocks of a different kind -- never between
+        consecutive lines of the same block (a tool-call burst, a run of dim
+        status lines)."""
+        if self._last_block is not None and self._last_block != kind:
+            self._append("")
+        self._last_block = kind
 
-    def _thinking_text(self) -> str:
-        glyph = SPINNER_FRAMES[self._thinking_frame % len(SPINNER_FRAMES)]
-        return f"[dim]{glyph} thinking…[/dim]"
+    # ---- empty state (Part R10) ---------------------------------------------
 
-    def _tick_thinking(self) -> None:
-        self._thinking_frame += 1
-        if self._thinking_widget is not None:
-            self._thinking_widget.update(self._thinking_text())
+    def show_empty_state(self) -> None:
+        self._empty_state = _EmptyState()
+        self.mount(self._empty_state)
+
+    def _hide_empty_state(self) -> None:
+        if self._empty_state is not None:
+            self._empty_state.remove()
+            self._empty_state = None
+
+    # ---- live status footer (Part R5) ---------------------------------------
+
+    def note_usage(self, ev: events.Usage) -> None:
+        self._last_usage = ev
+        self._refresh_status_now()
+
+    def _verb(self) -> str:
+        if self._active_tool_count > 0:
+            n = self._active_tool_count
+            return f"Running {n} tool{'' if n == 1 else 's'}…"
+        if self._active_subagents:
+            return "Waiting for subagent…"
+        if self._phase == "streaming":
+            return "Writing…"
+        return "Thinking…"
+
+    def _status_text(self) -> str:
+        frame = SPINNER_FRAMES[self._status_frame % len(SPINNER_FRAMES)]
+        elapsed = time.monotonic() - self._turn_started if self._turn_started else 0.0
+        thinking = self._thinking_seconds
+        if self._thinking_entered is not None:
+            thinking += time.monotonic() - self._thinking_entered
+        tokens = (self._last_usage.completion_tokens if self._last_usage is not None
+                 else round(len(self._live_text) / 4))
+        bits = [f"{elapsed:.0f}s"]
+        if tokens:
+            bits.append(f"↓ {format.fmt_num(tokens)} tokens")
+        if thinking >= 1:
+            bits.append(f"thought for {thinking:.0f}s")
+        return (f"[$accent]{frame}[/$accent] [$accent]{self._verb()}[/$accent] "
+               f"[dim]({' · '.join(bits)})[/dim]")
+
+    def _refresh_status_now(self) -> None:
+        if self._status_widget is not None:
+            self._status_widget.update(self._status_text())
+
+    def _tick_status(self) -> None:
+        self._status_frame += 1
+        self._refresh_status_now()
+
+    def _ensure_status(self) -> None:
+        if self._status_widget is None:
+            self._status_widget = _LiveStatus(self._status_text())
+            self.mount(self._status_widget)
+            self._status_timer = self.set_interval(0.08, self._tick_status)
+
+    def _stop_status(self) -> None:
+        if self._status_timer is not None:
+            self._status_timer.stop()
+            self._status_timer = None
+        if self._status_widget is not None:
+            self._status_widget.remove()
+            self._status_widget = None
 
     def note_phase(self, state: str) -> None:
+        now = time.monotonic()
+        if self._phase == "thinking" and state != "thinking" and self._thinking_entered is not None:
+            self._thinking_seconds += now - self._thinking_entered
+            self._thinking_entered = None
+        if state == "thinking" and self._thinking_entered is None:
+            self._thinking_entered = now
         if state == "waiting":
             self._top_group = None
-        self.set_thinking(state == "thinking")
+        if state == "idle":
+            self._phase = state
+            self._stop_status()
+            self._turn_started = None
+            self._thinking_seconds = 0.0
+            self._thinking_entered = None
+            self._active_tool_count = 0
+            self._last_usage = None
+            return
+        if self._turn_started is None:
+            self._turn_started = now
+        self._phase = state
+        self._ensure_status()
+        self._refresh_status_now()
 
-    # ---- turn text ----------------------------------------------------------
+    # ---- turn text ------------------------------------------------------------
 
     def add_user_message(self, text: str, mode: str) -> None:
-        self._append("")
-        self._append(f"[bold]›[/bold] {text}   [dim]{mode}[/dim]")
+        self._hide_empty_state()
+        self._ensure_gap("user")
+        width = (self.size.width or 78) - 4
+        left = f"[bold]›[/bold] {text}  [dim]{mode}[/dim]"
+        ts = time.strftime("%H:%M")
+        self._mount_widget(_PromptBand(format.right_align(left, f"[dim]{ts}[/dim]", width)))
 
     def add_text_delta(self, text: str) -> None:
         if self._live_assistant is None:
+            self._ensure_gap("assistant")
             self._live_text = ""
             self._live_assistant = self._append("")
         self._live_text += text
-        self._live_assistant.update(self._live_text)
+        self._live_assistant.update(f"●  {self._live_text}")
 
     def finalize_turn(self, text: str) -> None:
+        self._stop_status()
         text = text or self._live_text
         if not text:
             return
         if self._live_assistant is None:
+            self._ensure_gap("assistant")
             self._live_assistant = self._append("")
-        self._live_assistant.update(Markdown(text, code_theme="monokai"))
+        self._live_assistant.update(Markdown(f"●  {text}", code_theme="monokai"))
         self._live_assistant = None
         self._live_text = ""
 
-    # ---- tool calls (C4/C7/C9) -----------------------------------------------
+    # ---- tool calls (C4/C7/C9, Part R2/R3) -------------------------------------
 
     def _group_for(self, key: str | None) -> _Group:
         if key is None:
             if self._top_group is None:
-                self._top_group = _Group()
+                self._top_group = _Group(is_sub=False)
             return self._top_group
-        return self._sub_groups.setdefault(key, _Group())
+        return self._sub_groups.setdefault(key, _Group(is_sub=True))
 
     def _more_text(self, group: _Group) -> str:
-        return f"  [dim]… +{group.total - group.shown} more (▸ to expand)[/dim]"
+        remaining = group.total - group.shown
+        lead = "  [dim]└ …" if group.is_sub else "  [dim]…"
+        return f"{lead} +{remaining} more (▸ to expand)[/dim]"
+
+    def _detail_width(self) -> int | None:
+        w = self.size.width
+        return max(10, w - 20) if w else None
+
+    def _outcome_line(self, outcome: str) -> str:
+        is_error = outcome.startswith("→ error")
+        sub = outcome[2:] if outcome.startswith("→ ") else outcome
+        color = "red" if is_error else "dim"
+        return f"  [{color}]└ {sub}[/{color}]"
 
     def add_tool_start(self, ev: events.ToolStart) -> None:
         if ev.name == "subagent":
             return
+        self._active_tool_count += 1
+        self._refresh_status_now()
         key = ev.subagent_id
         sig = (ev.name, ev.args_preview, key)
         if self._last_sig == sig and self._last_widget is not None:
@@ -202,8 +357,11 @@ class Transcript(VerticalScroll):
         group.total += 1
         if group.shown < _GROUP_CAP:
             group.shown += 1
+            if key is None:
+                self._ensure_gap("tools")
             show_suffix = key is None or len(self._active_subagents) > 1
-            markup = format.tool_start(ev, show_subagent_suffix=show_suffix)
+            markup = format.tool_start(ev, show_subagent_suffix=show_suffix,
+                                       width=self._detail_width())
             widget = self._append(markup)
             self._call_widget[ev.call_id] = widget
             self._call_base[ev.call_id] = markup
@@ -213,18 +371,16 @@ class Transcript(VerticalScroll):
             self._last_sig = None
             self._last_widget = None
             if group.more is None:
+                if key is None:
+                    self._ensure_gap("tools")
                 group.more = self._append_more(group)
             else:
                 group.more.update(self._more_text(group))
             self._latest_group = group
 
     def _append_more(self, group: _Group) -> Static:
-        at_bottom = self.scroll_y >= self.max_scroll_y - 1
         line = _MoreLine(self._more_text(group), lambda: self._expand_group(group))
-        self.mount(line)
-        if at_bottom:
-            self.scroll_end(animate=False)
-        return line
+        return self._mount_widget(line)
 
     def _expand_group(self, group: _Group) -> None:
         if group.expanded or not group.hidden:
@@ -232,13 +388,14 @@ class Transcript(VerticalScroll):
         group.expanded = True
         for start_ev in group.hidden:
             show_suffix = start_ev.subagent_id is None or len(self._active_subagents) > 1
-            markup = format.tool_start(start_ev, show_subagent_suffix=show_suffix)
+            markup = format.tool_start(start_ev, show_subagent_suffix=show_suffix,
+                                       width=self._detail_width())
             widget = self._append(markup)
             self._call_widget[start_ev.call_id] = widget
             self._call_base[start_ev.call_id] = markup
             end_ev = self._buffered_end.pop(start_ev.call_id, None)
             if end_ev is not None and end_ev.outcome:
-                widget.update(f"{markup}  [dim]{end_ev.outcome}[/dim]")
+                self._append(self._outcome_line(end_ev.outcome))
         if group.more is not None:
             group.more.remove()
             group.more = None
@@ -251,54 +408,64 @@ class Transcript(VerticalScroll):
     def add_tool_end(self, ev: events.ToolEnd) -> None:
         if ev.name == "subagent":
             return
+        self._active_tool_count = max(0, self._active_tool_count - 1)
+        self._refresh_status_now()
         widget = self._call_widget.get(ev.call_id)
         if widget is None:
             self._buffered_end[ev.call_id] = ev
             return
         if not ev.outcome:
             return
-        base = self._call_base.get(ev.call_id, "")
-        widget.update(f"{base}  [dim]{ev.outcome}[/dim]")
+        self._append(self._outcome_line(ev.outcome))
 
     def add_subagent_spawned(self, ev: events.SubagentSpawned) -> None:
         self._active_subagents.add(ev.subagent_id)
+        self._sub_task_text[ev.subagent_id] = ev.task_preview
         self._top_group = None
-        markup = format.subagent_spawned(ev)
+        self._ensure_gap("tools")
+        markup = format.subagent_spawned(ev, show_id=len(self._active_subagents) > 1)
         widget = self._append(markup)
         self._sub_spawn_widget[ev.subagent_id] = widget
-        self._sub_spawn_base[ev.subagent_id] = markup
         self._sub_start_time[ev.subagent_id] = time.monotonic()
+        self._refresh_status_now()
 
     def add_subagent_done(self, ev: events.SubagentDone) -> None:
         self._active_subagents.discard(ev.subagent_id)
         widget = self._sub_spawn_widget.pop(ev.subagent_id, None)
-        base = self._sub_spawn_base.pop(ev.subagent_id, None)
+        task = self._sub_task_text.pop(ev.subagent_id, "")
         started = self._sub_start_time.pop(ev.subagent_id, None)
-        if widget is None or base is None:
+        self._refresh_status_now()
+        if widget is None:
             return
         elapsed = time.monotonic() - started if started is not None else 0.0
-        widget.update(f"{base}  [dim]✓ {elapsed:.0f}s[/dim]")
+        widget.update(format.subagent_done(ev, task_preview=task, elapsed_s=elapsed))
 
     def add_compacted(self, ev: events.Compacted) -> None:
+        self._ensure_gap("other")
         self._append(format.compacted(ev))
 
     def add_memory_write(self, ev: events.MemoryWrite) -> None:
+        self._ensure_gap("other")
         self._append(format.memory_write(ev))
 
     def add_memory_consolidated(self, ev: events.MemoryConsolidated) -> None:
+        self._ensure_gap("other")
         self._append(format.memory_consolidated(ev))
 
     def add_error(self, ev: events.Error) -> None:
-        first_line = ev.message.splitlines()[0] if ev.message else ""
-        detail = f" [dim](details in ~/.omega/sessions/{self._session_id}.json)[/dim]" if self._session_id else ""
-        self._append(f"[red]error:[/red] {first_line}{detail}")
+        self._ensure_gap("other")
+        detail = f"  [dim](details in ~/.omega/sessions/{self._session_id}.json)[/dim]" if self._session_id else ""
+        self._append(f"{format.error(ev)}{detail}")
 
     def add_mode_switch(self, mode: str) -> None:
+        self._ensure_gap("other")
         self._append(f"[dim]mode: {mode}[/dim]")
 
     def add_resumed(self, session_id: str, turns: int, messages: int, cwd: str, ago: str = "") -> None:
+        self._ensure_gap("other")
         suffix = f", last active {ago} ago" if ago else ""
         self._append(f"[dim]resumed {session_id} — {turns} turns, {messages} messages{suffix} · {cwd}[/dim]")
 
     def add_dim(self, text: str) -> None:
+        self._ensure_gap("other")
         self._append(f"[dim]{text}[/dim]")

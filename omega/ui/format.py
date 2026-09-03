@@ -46,6 +46,99 @@ def _q(text: Any, limit: int = 60) -> str:
     return f"'{_truncate(text, limit)}'"
 
 
+def truncate_middle(text: str, width: int) -> str:
+    """Cut from the middle rather than the end -- a path or command that
+    overruns the terminal keeps both its recognizable start and its
+    (usually more specific) tail instead of losing the tail to a fixed cutoff."""
+    if width <= 0 or len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    keep = width - 1
+    left = (keep + 1) // 2
+    right = keep - left
+    return text[:left] + "…" + (text[-right:] if right else "")
+
+
+def fmt_num(n: float) -> str:
+    """`13600 -> '13.6k'`, `1_000_000 -> '1.0M'`, `42 -> '42'` -- one shared
+    scale so chars/tokens/counts never disagree on how big "big" is."""
+    n = float(n)
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000:
+        return f"{sign}{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{sign}{n / 1_000:.1f}k"
+    return f"{sign}{int(n)}"
+
+
+_TAG_RE = re.compile(r"\[/?[a-zA-Z0-9_ $#,.\-]*\]")
+
+
+def visible_len(markup: str) -> int:
+    """Length of `markup` with `[style]...[/style]` tags removed -- good
+    enough for column math since every glyph this UI prints is single-width."""
+    return len(_TAG_RE.sub("", markup))
+
+
+def right_align(left: str, right: str, width: int) -> str:
+    """`left`, padded with spaces so `right` lands at column `width`. Falls
+    back to a single space when the two would collide in a narrow terminal."""
+    gap = width - visible_len(left) - visible_len(right)
+    if gap < 1:
+        return f"{left} {right}"
+    return f"{left}{' ' * gap}{right}"
+
+
+def _without_name(name: str, preview: str) -> str:
+    """`describe_call`'s output always leads with the tool name (sidebar.py's
+    path/server extraction depends on that), but the TUI renders the name
+    separately in bold -- repeating it verbatim on the same line reads as a
+    typo, not emphasis, so strip it back off for display."""
+    if preview == name:
+        return ""
+    prefix = name + "  "
+    return preview[len(prefix):] if preview.startswith(prefix) else preview
+
+
+def pad_name(name: str, width: int = 12) -> str:
+    """Left-justify `name` to `width` columns (never truncated) so a run of
+    tool lines lines up its detail text in one column."""
+    return f"{name:<{width}}" if len(name) < width else name + "  "
+
+
+def abbrev_cwd(path: str, segments: int = 3) -> str:
+    """`~`-abbreviated, trimmed to its last `segments` path components -- the
+    header bar has one line to spend on a cwd that can otherwise be very
+    long."""
+    home = str(Path.home())
+    if path == home or path.startswith(home + "/"):
+        rest = path[len(home):].lstrip("/")
+        parts = rest.split("/") if rest else []
+        if len(parts) > segments:
+            return "~/…/" + "/".join(parts[-segments:])
+        return "~/" + "/".join(parts) if parts else "~"
+    parts = [p for p in path.split("/") if p]
+    if len(parts) > segments:
+        return ".../" + "/".join(parts[-segments:])
+    return path
+
+
+def relative_age(seconds: float) -> str:
+    """`3661 -> '1h'` -- coarse, human "how long ago" for a timestamp diff."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)}m"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{int(hours)}h"
+    return f"{int(hours / 24)}d"
+
+
 # ---- category colors -------------------------------------------------------
 
 _MEMORY_TOOLS = {"remember", "recall", "supersede", "link"}
@@ -186,23 +279,42 @@ def describe_outcome(name: str, text: str, duration_s: float, offloaded: bool,
         m = _EXIT_RE.search(text)
         if m and m.group(1) != "0":
             parts.append(f"exit {m.group(1)}")
+    elif name == "find_tools":
+        if stripped.startswith("no tools matched") or not stripped:
+            parts.append("no match")
+        else:
+            count = stripped.count("\n\n") + 1
+            parts.append(f"{count} tool{'' if count == 1 else 's'}")
+    elif name == "recall":
+        if stripped == "(no matching memories)" or not stripped:
+            parts.append("none")
+        else:
+            count = stripped.count("\n\n") + 1
+            parts.append(f"{count} memor{'y' if count == 1 else 'ies'}")
+    elif name == "call_tool" and not offloaded:
+        parts.append(f"{fmt_num(result_chars)} chars")
 
     if duration_s >= 1:
         parts.append(f"{duration_s:.1f}s")
     if offloaded:
-        parts.append(f"{result_chars / 1000:.1f}k chars · artifact {artifact_id}")
+        parts.append(f"{fmt_num(result_chars)} chars · artifact {artifact_id}")
 
     return "→ " + " · ".join(parts) if parts else ""
 
 
 # ---- transcript one-liners --------------------------------------------------
 
-def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True) -> str:
+def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True,
+               width: int | None = None) -> str:
     style = style_for(ev.name)
+    detail = _without_name(ev.name, ev.args_preview)
+    if width is not None:
+        detail = truncate_middle(detail, width)
+    name_col = pad_name(ev.name)
     if ev.subagent_id:
         suffix = f"  ({ev.tier}·{ev.subagent_id})" if show_subagent_suffix else ""
-        return f"  [dim]⏺ [{style}]{ev.name}[/{style}]  {ev.args_preview}{suffix}[/dim]"
-    return f"[{style}]⏺[/{style}] [bold {style}]{ev.name}[/bold {style}]  [italic]{ev.args_preview}[/italic]"
+        return f"  [dim]└ [{style}]{name_col}[/{style}]{detail}{suffix}[/dim]"
+    return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{detail}"
 
 
 def tool_end(ev: events.ToolEnd) -> str | None:
@@ -210,16 +322,20 @@ def tool_end(ev: events.ToolEnd) -> str | None:
         return f"  [dim]↳ {ev.outcome or f'offloaded → artifact {ev.artifact_id}'}[/dim]"
     if ev.outcome.startswith("→ error") or (ev.name == "bash" and "exit" in ev.outcome):
         return f"  [dim]{ev.outcome}[/dim]"
+    if ev.name in ("find_tools", "call_tool", "recall") and ev.outcome:
+        return f"  [dim]{ev.outcome}[/dim]"
     return None
 
 
-def subagent_spawned(ev: events.SubagentSpawned) -> str:
-    return (f"[green]⏺[/green] [bold green]subagent[/bold green]([green]{ev.tier}[/green]) "
-           f"{ev.task_preview}  [{ev.subagent_id}]")
+def subagent_spawned(ev: events.SubagentSpawned, *, show_id: bool = False) -> str:
+    id_suffix = f"  [dim]{ev.subagent_id}[/dim]" if show_id else ""
+    return (f"[green]●[/green] [bold green]subagent[/bold green]([green]{ev.tier}[/green]) "
+           f"{ev.task_preview}{id_suffix}")
 
 
-def subagent_done(ev: events.SubagentDone) -> str:
-    return f"  [dim]✓ {ev.subagent_id} done[/dim]"
+def subagent_done(ev: events.SubagentDone, task_preview: str = "", elapsed_s: float = 0.0) -> str:
+    task = task_preview or ev.subagent_id
+    return f'[green]●[/green] Agent [bold]"{task}"[/bold] finished · {elapsed_s:.0f}s'
 
 
 def compacted(ev: events.Compacted) -> str:
@@ -235,4 +351,5 @@ def memory_consolidated(ev: events.MemoryConsolidated) -> str:
 
 
 def error(ev: events.Error) -> str:
-    return f"[red]error:[/red] {ev.message}"
+    first_line = ev.message.splitlines()[0] if ev.message else ""
+    return f"[red]✗[/red] error  {first_line}"

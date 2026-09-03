@@ -159,3 +159,31 @@ def test_defaults_load_without_a_config_file(tmp_path, monkeypatch):
     assert cfg.role("main").alias == "opus"
     assert "fable" in cfg.models and "opus" in cfg.models
     assert cfg.providers["anthropic"].type == "anthropic"
+
+
+def test_default_catalog_fallback_chain(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "no-such-config.json")
+    cfg = config.load()
+
+    assert cfg.model("fable").fallback_alias == "opus"
+    assert cfg.model("opus").fallback_alias == "sonnet"
+    assert cfg.model("sonnet").fallback_alias == "haiku"
+    assert cfg.model("haiku").fallback_alias is None
+    assert cfg.model("spark").fallback_alias == "kimi"
+
+
+def test_model_without_fallback_defaults_to_none(tmp_path, monkeypatch):
+    write_config(tmp_path, BASE)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = config.load()
+    assert cfg.model("big").fallback_alias is None
+
+
+def test_model_fallback_from_config_file(tmp_path, monkeypatch):
+    data = {**BASE, "models": {**BASE["models"],
+                               "big": {**BASE["models"]["big"], "fallback": "small"}}}
+    write_config(tmp_path, data)
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "config.json")
+    cfg = config.load()
+    assert cfg.model("big").fallback_alias == "small"
+    assert cfg.role("main").fallback_alias == "small"
