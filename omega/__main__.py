@@ -563,6 +563,13 @@ async def _main_guarded() -> None:
 
 def cli() -> None:
     migrate.run()
+    # uvicorn owns its own event loop, so the daemon must start before
+    # asyncio.run() below.
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        from .server.app import main as serve_main
+        args = sys.argv[2:]
+        port = int(args[args.index("--port") + 1]) if "--port" in args else 7777
+        return serve_main(port=port)
     try:
         asyncio.run(_main_guarded())
     except KeyboardInterrupt:

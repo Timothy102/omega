@@ -29,6 +29,10 @@ dependencies = [
     "textual>=8.2.8",
     "anthropic>=1.2.0",
     "pyyaml>=6.0.3",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "websockets>=17.1",
+    "pydantic>=2.13.5",
 ]
 
 [project.urls]
