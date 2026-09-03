@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from rich.markup import escape
+
 from .. import events
 
 # ---- paths ---------------------------------------------------------------
@@ -313,43 +315,43 @@ def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True,
     name_col = pad_name(ev.name)
     if ev.subagent_id:
         suffix = f"  ({ev.tier}·{ev.subagent_id})" if show_subagent_suffix else ""
-        return f"  [dim]└ [{style}]{name_col}[/{style}]{detail}{suffix}[/dim]"
-    return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{detail}"
+        return f"  [dim]└ [{style}]{name_col}[/{style}]{escape(detail)}{suffix}[/dim]"
+    return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{escape(detail)}"
 
 
 def tool_end(ev: events.ToolEnd) -> str | None:
     if ev.offloaded:
-        return f"  [dim]↳ {ev.outcome or f'offloaded → artifact {ev.artifact_id}'}[/dim]"
+        return f"  [dim]↳ {escape(ev.outcome) or f'offloaded → artifact {ev.artifact_id}'}[/dim]"
     if ev.outcome.startswith("→ error") or (ev.name == "bash" and "exit" in ev.outcome):
-        return f"  [dim]{ev.outcome}[/dim]"
+        return f"  [dim]{escape(ev.outcome)}[/dim]"
     if ev.name in ("find_tools", "call_tool", "recall") and ev.outcome:
-        return f"  [dim]{ev.outcome}[/dim]"
+        return f"  [dim]{escape(ev.outcome)}[/dim]"
     return None
 
 
 def subagent_spawned(ev: events.SubagentSpawned, *, show_id: bool = False) -> str:
     id_suffix = f"  [dim]{ev.subagent_id}[/dim]" if show_id else ""
     return (f"[green]●[/green] [bold green]subagent[/bold green]([green]{ev.tier}[/green]) "
-           f"{ev.task_preview}{id_suffix}")
+           f"{escape(ev.task_preview)}{id_suffix}")
 
 
 def subagent_done(ev: events.SubagentDone, task_preview: str = "", elapsed_s: float = 0.0) -> str:
     task = task_preview or ev.subagent_id
-    return f'[green]●[/green] Agent [bold]"{task}"[/bold] finished · {elapsed_s:.0f}s'
+    return f'[green]●[/green] Agent [bold]"{escape(task)}"[/bold] finished · {elapsed_s:.0f}s'
 
 
 def compacted(ev: events.Compacted) -> str:
-    return f"[dim]⏺ {ev.note}[/dim]"
+    return f"[dim]⏺ {escape(ev.note)}[/dim]"
 
 
 def memory_write(ev: events.MemoryWrite) -> str:
-    return f"  [blue]◆[/blue] [dim]memory: {ev.type} '{ev.title}' ({ev.scope})[/dim]"
+    return f"  [blue]◆[/blue] [dim]memory: {ev.type} '{escape(ev.title)}' ({ev.scope})[/dim]"
 
 
 def memory_consolidated(ev: events.MemoryConsolidated) -> str:
-    return f"  [blue]◆[/blue] [dim]memory: {ev.summary}[/dim]"
+    return f"  [blue]◆[/blue] [dim]memory: {escape(ev.summary)}[/dim]"
 
 
 def error(ev: events.Error) -> str:
     first_line = ev.message.splitlines()[0] if ev.message else ""
-    return f"[red]✗[/red] error  {first_line}"
+    return f"[red]✗[/red] error  {escape(first_line)}"

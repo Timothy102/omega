@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from rich.markdown import Markdown
+from rich.markup import escape
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.events import Click
@@ -291,7 +292,7 @@ class Transcript(VerticalScroll):
         self._hide_empty_state()
         self._ensure_gap("user")
         width = (self.size.width or 78) - 4
-        left = f"[bold]›[/bold] {text}  [dim]{mode}[/dim]"
+        left = f"[bold]›[/bold] {escape(text)}  [dim]{mode}[/dim]"
         ts = time.strftime("%H:%M")
         self._mount_widget(_PromptBand(format.right_align(left, f"[dim]{ts}[/dim]", width)))
 
@@ -301,7 +302,8 @@ class Transcript(VerticalScroll):
             self._live_text = ""
             self._live_assistant = self._append("")
         self._live_text += text
-        self._live_assistant.update(f"●  {self._live_text}")
+        # Model text is data, not markup: a stray "[/x]" must never raise.
+        self._live_assistant.update(f"●  {escape(self._live_text)}")
 
     def finalize_turn(self, text: str) -> None:
         self._stop_status()

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -205,6 +206,16 @@ class OmegaApp(App[None]):
         self.query_one(Sidebar).git_tab.refresh_repos()
 
     def emit(self, ev: events.Event) -> None:
+        # A rendering bug must never abort the agent's turn.
+        try:
+            self._dispatch(ev)
+        except Exception as e:
+            try:
+                self.query_one(Transcript).add_dim(f"⚠ render error: {type(e).__name__}: {escape(str(e))[:120]}")
+            except Exception:
+                pass
+
+    def _dispatch(self, ev: events.Event) -> None:
         transcript = self.query_one(Transcript)
         sidebar = self.query_one(Sidebar)
         match ev:
