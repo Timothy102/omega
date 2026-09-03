@@ -9,3 +9,9 @@ build/
 .omega/
 .DS_Store
 .env
+
+# Xcode / SwiftPM
+app/**/.build/
+app/**/DerivedData/
+app/**/xcuserdata/
+*.xcuserstate

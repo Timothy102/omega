@@ -1,0 +1,85 @@
+name: Omega
+options:
+  bundleIdPrefix: com.timcvetko
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+
+packages:
+  OmegaCore:
+    path: Packages/OmegaCore
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: "1.0.0"
+
+targets:
+  Omega:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: App
+      - path: Views
+      - path: Models
+      - path: Services
+    dependencies:
+      - package: OmegaCore
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.timcvetko.omega
+        PRODUCT_NAME: Omega
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Omega
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: ""
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSUserNotificationsUsageDescription: "Omega notifies you when a task needs your input or finishes."
+    entitlements:
+      path: App/Omega.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+        com.apple.security.network.server: false
+        com.apple.security.files.user-selected.read-write: true
+
+schemes:
+  Omega:
+    build:
+      targets:
+        Omega: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - package: OmegaCore/OmegaCoreTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
