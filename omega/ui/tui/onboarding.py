@@ -18,6 +18,7 @@ from textual.widgets.option_list import Option
 
 from ... import config, events, loop, onboarding
 from .. import format
+from . import theme
 from .status import SPINNER_FRAMES
 
 Body = dict[str, Any]
@@ -355,6 +356,8 @@ class DoneScreen(WizardScreen):
 class OnboardingApp(App[bool]):
     def __init__(self) -> None:
         super().__init__()
+        self.register_theme(theme.SYSTEM_THEME)
+        self.theme = theme.SYSTEM_THEME.name
         self.choice: onboarding._Choice | None = None
         self.main_alias = ""
         self.cheap_alias = ""

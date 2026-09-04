@@ -5,19 +5,22 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
-from textual.events import Click
-from textual.widgets import Collapsible, Static, TabbedContent, TabPane
+from textual.events import Click, Resize
+from textual.widgets import Collapsible, ContentSwitcher, Static
 
 from ... import events, gitlog, session
 from .. import format
 from .status import SPINNER_FRAMES
 
 TAB_IDS = ["tab-session", "tab-git", "tab-connections"]
+TAB_LABELS = {"tab-session": "session", "tab-git": "git", "tab-connections": "connections"}
+_TAB_GAP = 3
 
 _STATUS_COLOR = {"M": "yellow", "A": "green", "D": "red", "R": "yellow", "?": "dim"}
 
@@ -51,7 +54,25 @@ def _extract_mcp_server(preview: str) -> str | None:
 def _section(title: str, width: int) -> str:
     label = title.upper()
     bar = "─" * max(1, width - len(label) - 1)
-    return f"[bold]{label}[/bold] [dim]{bar}[/dim]"
+    return f"[bold]{label}[/bold] [$rule]{bar}[/$rule]"
+
+
+def _rule(width: int) -> str:
+    return f"[$rule]{'─' * max(1, width)}[/$rule]"
+
+
+def _kv(rows: list[tuple[str, str]]) -> list[str]:
+    """Aligned `label   value` lines: dim labels in one column, values in
+    the next, and a value's own newlines continue under the value column."""
+    if not rows:
+        return []
+    col = max(len(label) for label, _ in rows) + 2
+    lines = []
+    for label, value in rows:
+        first, *rest = value.split("\n")
+        lines.append(f"[dim]{label.ljust(col)}[/dim]{first}")
+        lines.extend(f"{' ' * col}{line}" for line in rest)
+    return lines
 
 
 def _chips(counter: Counter[str]) -> str:
@@ -69,7 +90,7 @@ def _context_bar(used: int, limit: int, cells: int = 8) -> str:
     anything has been used, so a near-empty context window doesn't read as a
     dead bar."""
     if limit <= 0:
-        return f"{'▱' * cells} {format.fmt_num(used)} / – · –"
+        return f"{'▱' * cells} {format.fmt_num(used)} / –"
     pct = used / limit
     filled = max(1, round(pct * cells)) if used > 0 else 0
     filled = min(cells, filled)
@@ -82,9 +103,9 @@ def _files_block(files: dict[str, set[str]], limit: int = 15) -> str:
         return "[dim](none)[/dim]"
     rows = []
     for path, kinds in list(files.items())[:limit]:
-        mark = "".join(sorted(kinds))
+        mark = "".join(sorted(kinds)).ljust(2)
         color = "yellow" if "W" in kinds else "cyan"
-        rows.append(f"[{color}]{mark}[/{color}] [dim]{format.esc(path)}[/dim]")
+        rows.append(f"[{color}]{mark}[/{color}] {format.esc(path)}")
     more = len(files) - limit
     text = "\n".join(rows)
     if more > 0:
@@ -93,8 +114,9 @@ def _files_block(files: dict[str, set[str]], limit: int = 15) -> str:
 
 
 class SessionTab(VerticalScroll):
-    def __init__(self, sess: session.Session, *, touched: set[str] | None = None) -> None:
-        super().__init__()
+    def __init__(self, sess: session.Session, *, touched: set[str] | None = None,
+                 id: str | None = None) -> None:
+        super().__init__(id=id)
         self._sess = sess
         self._body = Static("")
         self._tool_turn: Counter[str] = Counter()
@@ -118,6 +140,7 @@ class SessionTab(VerticalScroll):
         # from its own recorded events alone.
         self._usage_totals: dict[str, dict[str, int]] = {}
         self._last_model: tuple[str | None, str] = (None, "?")
+        self._context_limit = 0
         self._touched = touched if touched is not None else set()
         self._turn_started: float | None = None
         self._turn_elapsed = 0.0
@@ -157,8 +180,10 @@ class SessionTab(VerticalScroll):
         self._sess = sess
         self.reset_turn()
 
-    def record_model(self, alias: str | None, model: str) -> None:
+    def record_model(self, alias: str | None, model: str, *, limit: int | None = None) -> None:
         self._last_model = (alias, model)
+        if limit is not None:
+            self._context_limit = limit
         self._repaint()
 
     def record_usage(self, ev: events.Usage) -> None:
@@ -225,41 +250,55 @@ class SessionTab(VerticalScroll):
         width = self.size.width or 28
         alias, model = self._last_model
         used = self._usage.used if self._usage else 0
-        limit = self._usage.limit if self._usage else 0
+        limit = self._usage.limit if self._usage else self._context_limit
 
         lines = [_section("model", width)]
-        lines.append(f"[bold]{alias}[/bold] · {model}" if alias else model)
-        lines.append(_context_bar(used, limit))
-        lines.append(f"${self._cost_so_far():.2f}")
+        lines += _kv([
+            ("model", f"[bold]{format.esc(alias)}[/bold]  [dim]{format.esc(model)}[/dim]"
+                      if alias else format.esc(model)),
+            ("context", _context_bar(used, limit)),
+            ("cost", f"${self._cost_so_far():.2f}"),
+        ])
         lines.append("")
 
         lines.append(_section("this turn", width))
-        lines.append(f"[dim]{self._turn_elapsed_seconds():.0f}s[/dim]")
+        turn_rows = [("elapsed", f"{self._turn_elapsed_seconds():.0f}s")]
         if self._tool_turn:
-            lines.append(_chips(self._tool_turn))
+            turn_rows.append(("tools", _chips(self._tool_turn)))
         if self._files_turn:
-            lines.append("[dim]FILES[/dim]")
-            lines.append(_files_block(self._files_turn))
+            turn_rows.append(("files", _files_block(self._files_turn)))
+        if self._subagents_turn:
+            turn_rows.append(("agents", "\n".join(self._subagent_lines())))
+        lines += _kv(turn_rows)
+        lines.append("")
+
+        lines.append(_section("totals", width))
+        total_rows = [
+            ("turns", str(self._sess.turns)),
+            ("tokens", format.fmt_num(self._session_tokens())),
+            ("tools", str(sum(self._tool_session.values()))),
+            ("artifacts", str(self._artifacts)),
+            ("memory", f"{self._memory_recalls} recalls · {self._memory_writes} writes"),
+        ]
+        if self._files_session:
+            total_rows.append(("files", _files_block(self._files_session)))
+        if self._mcp_servers:
+            total_rows.append(("mcp", ", ".join(sorted(self._mcp_servers))))
+        lines += _kv(total_rows)
+        self._body.update("\n".join(lines))
+
+    def _subagent_lines(self) -> list[str]:
+        out = []
         for sid, tier in self._subagents_turn:
             started = self._sub_start.get(sid)
             if started is not None:
                 elapsed = time.monotonic() - started
                 frame = SPINNER_FRAMES[int(elapsed / 0.08) % len(SPINNER_FRAMES)]
-                lines.append(f"[dim]{frame} {format.esc(tier)} · {format.esc(sid)} · {elapsed:.0f}s[/dim]")
+                out.append(f"[$accent]{frame}[/$accent] {format.esc(tier)} · "
+                           f"[dim]{format.esc(sid)} · {elapsed:.0f}s[/dim]")
             else:
-                lines.append(f"[green]✓[/green] [dim]{format.esc(tier)} · {format.esc(sid)}[/dim]")
-        lines.append("")
-
-        lines.append(_section("totals", width))
-        lines.append(f"[dim]{self._sess.turns} turns · {format.fmt_num(self._session_tokens())} tokens · "
-                     f"{sum(self._tool_session.values())} tools · {self._artifacts} artifacts[/dim]")
-        lines.append(f"[dim]{self._memory_recalls} recalls · {self._memory_writes} writes[/dim]")
-        if self._files_session:
-            lines.append("[dim]FILES[/dim]")
-            lines.append(_files_block(self._files_session))
-        if self._mcp_servers:
-            lines.append(f"[dim]mcp: {', '.join(sorted(self._mcp_servers))}[/dim]")
-        self._body.update("\n".join(lines))
+                out.append(f"[green]✓[/green] {format.esc(tier)} · [dim]{format.esc(sid)}[/dim]")
+        return out
 
 
 class _ChangeRow(Static, can_focus=True):
@@ -292,8 +331,8 @@ class _ChangeRow(Static, can_focus=True):
 
 
 class GitTab(VerticalScroll):
-    def __init__(self, cwd: str, *, touched: set[str] | None = None) -> None:
-        super().__init__()
+    def __init__(self, cwd: str, *, touched: set[str] | None = None, id: str | None = None) -> None:
+        super().__init__(id=id)
         self._cwd = cwd
         self._touched = touched if touched is not None else set()
 
@@ -339,8 +378,8 @@ class GitTab(VerticalScroll):
 
 
 class ConnectionsTab(VerticalScroll):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self._header = Static("")
         self._body = Static("[dim]loading…[/dim]")
 
@@ -383,38 +422,89 @@ class ConnectionsTab(VerticalScroll):
         self._body.update("\n".join(lines))
 
 
+class _TabStrip(Static):
+    """The panel's own flat tab row -- `SESSION  GIT  CONNECTIONS` with the
+    active one in bold, over a hairline that continues the header's rule
+    across the divider. Click a label to switch, same as ctrl+1/2/3."""
+
+    DEFAULT_CSS = """
+    _TabStrip { height: 2; }
+    """
+
+    def __init__(self, on_pick: Callable[[str], None]) -> None:
+        super().__init__()
+        self._active = TAB_IDS[0]
+        self._spans: list[tuple[int, int, str]] = []
+        self._on_pick = on_pick
+
+    def set_active(self, tab_id: str) -> None:
+        self._active = tab_id
+        self._repaint()
+
+    def on_mount(self) -> None:
+        self._repaint()
+
+    def on_resize(self, event: Resize) -> None:
+        self._repaint()
+
+    def on_click(self, event: Click) -> None:
+        for start, end, tab_id in self._spans:
+            if start <= event.x < end:
+                self._on_pick(tab_id)
+                return
+
+    def _repaint(self) -> None:
+        width = self.size.width or 28
+        parts, self._spans, x = [], [], 0
+        for tab_id in TAB_IDS:
+            label = TAB_LABELS[tab_id].upper()
+            style = "bold" if tab_id == self._active else "dim"
+            parts.append(f"[{style}]{label}[/{style}]")
+            self._spans.append((x, x + len(label), tab_id))
+            x += len(label) + _TAB_GAP
+        self.update((" " * _TAB_GAP).join(parts) + "\n" + _rule(width))
+
+
 class Sidebar(Container):
     DEFAULT_CSS = """
     Sidebar {
         width: 34;
         max-width: 40%;
-        background: $panel;
+        border-left: solid $rule;
+        padding: 0 0 0 1;
     }
+    Sidebar ContentSwitcher { height: 1fr; margin-top: 1; }
     """
 
     def __init__(self, sess: session.Session, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._touched: set[str] = set()
-        self.session_tab = SessionTab(sess, touched=self._touched)
-        self.git_tab = GitTab(sess.cwd, touched=self._touched)
-        self.connections_tab = ConnectionsTab()
+        self.session_tab = SessionTab(sess, touched=self._touched, id=TAB_IDS[0])
+        self.git_tab = GitTab(sess.cwd, touched=self._touched, id=TAB_IDS[1])
+        self.connections_tab = ConnectionsTab(id=TAB_IDS[2])
+        self._strip = _TabStrip(self._set_active)
         self._cwd = sess.cwd
 
     def compose(self) -> ComposeResult:
-        with TabbedContent(initial=TAB_IDS[0]):
-            with TabPane("Session", id=TAB_IDS[0]):
-                yield self.session_tab
-            with TabPane("Git", id=TAB_IDS[1]):
-                yield self.git_tab
-            with TabPane("Connections", id=TAB_IDS[2]):
-                yield self.connections_tab
+        yield self._strip
+        with ContentSwitcher(initial=TAB_IDS[0]):
+            yield self.session_tab
+            yield self.git_tab
+            yield self.connections_tab
+
+    @property
+    def active(self) -> str:
+        current = self.query_one(ContentSwitcher).current
+        return current if current in TAB_IDS else TAB_IDS[0]
+
+    def _set_active(self, tab_id: str) -> None:
+        self.query_one(ContentSwitcher).current = tab_id
+        self._strip.set_active(tab_id)
 
     def cycle_tab(self, forward: bool = True) -> None:
-        tabs = self.query_one(TabbedContent)
-        idx = TAB_IDS.index(tabs.active) if tabs.active in TAB_IDS else 0
-        idx = (idx + (1 if forward else -1)) % len(TAB_IDS)
-        tabs.active = TAB_IDS[idx]
+        idx = TAB_IDS.index(self.active)
+        self._set_active(TAB_IDS[(idx + (1 if forward else -1)) % len(TAB_IDS)])
 
     def show_tab(self, index: int) -> None:
         if 0 <= index < len(TAB_IDS):
-            self.query_one(TabbedContent).active = TAB_IDS[index]
+            self._set_active(TAB_IDS[index])

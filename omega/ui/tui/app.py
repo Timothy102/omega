@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.events import Resize
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -21,7 +21,7 @@ from textual.worker import Worker
 from ... import compact, config, events, export, gitlog, loop, session, trace
 from ...memory import consolidate
 from .. import format
-from . import prefs
+from . import prefs, theme
 from .history import InputHistory
 from .modals import AskUserScreen, ConfirmScreen, DiffScreen, ModelPickerScreen, SessionsScreen
 from .sidebar import Sidebar
@@ -38,8 +38,8 @@ _MODE_CYCLE = ["build", "plan", "discuss"]
 _MIN_WIDTH_FOR_SIDEBAR = 80
 
 _COMMANDS = ["/plan", "/build", "/discuss", "/mode", "/memory-gc", "/model", "/sidebar",
-            "/cost", "/export", "/compact", "/undo", "/diff", "/verify", "/sessions",
-            "/help", "/quit"]
+            "/theme", "/cost", "/export", "/compact", "/undo", "/diff", "/verify",
+            "/sessions", "/help", "/quit"]
 
 _HELP_TEXT = (
     "ctrl+c cancel turn  ·  ctrl+o /model switch model  ·  ctrl+b toggle side panel  ·  "
@@ -49,7 +49,8 @@ _HELP_TEXT = (
     "alt+d delete word forward\n"
     "ctrl+k delete to end  ·  ctrl+a/ctrl+e home/end  ·  alt+left/right word jump  ·  "
     "esc clear input (idle only)\n"
-    "/plan /build /discuss switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  /memory-gc\n"
+    "/plan /build /discuss switch modes  ·  /model <alias>  ·  /mode  ·  /sidebar  ·  "
+    "/theme system|light|dark  ·  /memory-gc\n"
     "/cost tokens & $  ·  /export [path]  ·  /compact  ·  /undo [n]  ·  /diff  ·  /verify  ·  "
     "/sessions  ·  /quit")
 
@@ -88,7 +89,7 @@ class HeaderBar(Static):
     width keeps this a single guaranteed-fitting line instead."""
 
     DEFAULT_CSS = """
-    HeaderBar { height: 1; color: $text-muted; padding: 0 1; }
+    HeaderBar { height: 2; color: $text-muted; padding: 0 1; }
     """
 
     _PREFIX = "⌘ omega  "
@@ -125,7 +126,8 @@ class HeaderBar(Static):
             tail = format.truncate_right(f"{cwd}{suffix}", width - len(self._PREFIX))
         else:
             tail = f"{cwd}{suffix}"
-        self.update(f"[bold]⌘ omega[/bold]  [dim]{format.esc(tail)}[/dim]")
+        rule = "─" * max(1, width or 40)
+        self.update(f"[bold]⌘ omega[/bold]  [dim]{format.esc(tail)}[/dim]\n[$rule]{rule}[/$rule]")
 
 
 class PromptInput(Input):
@@ -156,14 +158,19 @@ class PromptInput(Input):
 
 
 class OmegaApp(App[None]):
+    # Read by `get_css_variables` from inside `App.__init__`, before this
+    # instance has loaded its own preference.
+    theme_choice = theme.DEFAULT
     CSS = """
     Screen { layout: vertical; }
-    #header { height: 1; }
     #body { height: 1fr; }
-    #input-box { height: 3; border: round $surface-lighten-2; padding: 0 1; }
+    #main { width: 1fr; height: 1fr; }
+    #header { height: 2; }
+    #transcript { height: 1fr; padding-top: 1; }
+    #input-box { height: 3; border: round $rule; padding: 0 1; }
     #input-box:focus-within { border: round $accent; }
     #mode-tag { width: auto; padding: 0 1 0 0; }
-    #prompt { width: 1fr; }
+    #prompt { width: 1fr; background: transparent; }
     #prompt.-plan-mode { color: $warning; }
     #prompt.-discuss-mode { color: $accent; }
     """
@@ -206,12 +213,16 @@ class OmegaApp(App[None]):
         self._prefs = prefs.load()
         self._first_launch = not prefs.PATH.exists()
         self._sidebar_visible = bool(self._prefs.get("sidebar", False))
+        self.theme_choice = theme.normalize(self._prefs.get("theme"))
+        self.register_theme(theme.SYSTEM_THEME)
+        self.theme = theme.textual_theme(self.theme_choice)
         self._git_refresh_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        yield HeaderBar(id="header")
         with Horizontal(id="body"):
-            yield Transcript(id="transcript")
+            with Vertical(id="main"):
+                yield HeaderBar(id="header")
+                yield Transcript(id="transcript")
             yield Sidebar(self.sess, id="sidebar")
         yield StatusBar(id="status")
         with Horizontal(id="input-box"):
@@ -238,6 +249,17 @@ class OmegaApp(App[None]):
     def on_resize(self, event: Resize) -> None:
         self._apply_sidebar_visibility()
         self._refresh_status()
+
+    def get_css_variables(self) -> dict[str, str]:
+        variables = super().get_css_variables()
+        variables["rule"] = theme.rule_color(self.theme_choice)
+        return variables
+
+    def set_theme_choice(self, choice: str) -> None:
+        self.theme_choice = theme.normalize(choice)
+        self.theme = theme.textual_theme(self.theme_choice)
+        self._prefs["theme"] = self.theme_choice
+        prefs.save(self._prefs)
 
     def _apply_sidebar_visibility(self) -> None:
         """The panel follows the user's own ctrl+b/`/sidebar` preference, but
@@ -293,11 +315,18 @@ class OmegaApp(App[None]):
                 alias, model = role.alias, str(role.model)
             except Exception:
                 alias, model = self.model_alias, "?"
+            self.query_one(Sidebar).session_tab.record_model(alias, model, limit=self._static_context_limit())
         turns = sum(1 for m in self.history if m.get("role") == "user")
         state = StatusState(mode=self.mode, role_name=role_name, model=model, alias=alias,
                             session_id=self.sess.id, turns=turns, usage=self._usage,
                             phase=self._phase, sidebar_auto_hidden=self._sidebar_auto_hidden())
         self.query_one(StatusBar).set_state(state)
+
+    def _static_context_limit(self) -> int:
+        try:
+            return self._context_limit()
+        except Exception:
+            return 0
 
     def _schedule_git_refresh(self) -> None:
         if self._git_refresh_timer is not None:
@@ -459,6 +488,15 @@ class OmegaApp(App[None]):
             self._set_model(text[len("/model "):].strip())
         elif text == "/sidebar":
             self.action_toggle_sidebar()
+        elif text == "/theme":
+            transcript.add_dim(f"theme: {self.theme_choice}  ({' · '.join(theme.CHOICES)})")
+        elif text.startswith("/theme "):
+            choice = text[len("/theme "):].strip()
+            if choice not in theme.CHOICES:
+                transcript.add_dim(f"unknown theme: {choice}  (want one of {', '.join(theme.CHOICES)})")
+                return
+            self.set_theme_choice(choice)
+            transcript.add_dim(f"theme: {choice}")
         elif text == "/cost":
             transcript.add_dim(self._cost_text())
         elif text == "/export" or text.startswith("/export "):

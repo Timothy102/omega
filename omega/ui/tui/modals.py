@@ -17,6 +17,7 @@ from textual.widgets.option_list import Option
 from ... import events, gitlog, permissions, session
 from ...config import Model
 from .. import format
+from . import theme
 
 _DIALOG_CSS = """
 Vertical#dialog {
@@ -26,7 +27,6 @@ Vertical#dialog {
     max-height: 80%;
     padding: 1 2;
     border: round $accent;
-    background: $surface;
 }
 """
 
@@ -248,7 +248,8 @@ class DiffScreen(ModalScreen[None]):
         if not text:
             await body.mount(Static("[dim](no diff)[/dim]"))
             return
-        await body.mount(Static(Syntax(text, "diff", theme="monokai", word_wrap=True)))
+        await body.mount(Static(Syntax(text, "diff", theme=theme.current_code_theme(self.app),
+                                       word_wrap=True)))
 
     def action_close(self) -> None:
         self.dismiss(None)

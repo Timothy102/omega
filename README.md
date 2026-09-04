@@ -184,6 +184,10 @@ Session and edit-safety commands (TUI only):
 - `/undo [n]` — reverts the working tree to the checkpoint from `n` turns ago
   (default 1), after a y/n/always confirm.
 - `/diff` — shows the working-tree diff since the last checkpoint in a modal.
+- `/theme system|light|dark` — `system` (the default) paints nothing of its
+  own, so omega takes the terminal's background, text colour and palette and
+  looks light or dark along with it; `light` and `dark` force a painted
+  palette instead. Remembered in `~/.omega/ui.json`.
 - `/verify` — runs this project's auto-detected checks (tests/lint/types) and
   reports pass/fail per check.
 - `/sessions` — lists this directory's other sessions in a modal; enter

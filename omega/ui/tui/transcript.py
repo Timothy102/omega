@@ -27,6 +27,7 @@ from textual.widgets import Static
 
 from ... import events
 from .. import format
+from . import theme
 from .status import SPINNER_FRAMES
 
 _GROUP_CAP = 3
@@ -111,10 +112,10 @@ class _EmptyState(Static):
     DEFAULT_CSS = """
     _EmptyState {
         width: 100%;
-        height: auto;
+        height: 100%;
         content-align: center middle;
+        text-align: center;
         color: $text-muted;
-        padding: 2 0;
     }
     """
 
@@ -126,11 +127,11 @@ class _EmptyState(Static):
 
 
 class _PromptBand(Static):
-    """The turn-opening user-prompt row: a full-width subtle background band,
-    no border -- `add_user_message` builds the left/right-aligned text."""
+    """The turn-opening user-prompt row: an accent-coloured `›` and the text,
+    flat on the page -- `add_user_message` builds the left/right-aligned text."""
 
     DEFAULT_CSS = """
-    _PromptBand { width: 100%; background: $surface-lighten-1; padding: 0 2; }
+    _PromptBand { width: 100%; }
     """
 
 
@@ -150,7 +151,6 @@ class _NewOutputPill(Static):
         width: 100%;
         height: 1;
         content-align: right middle;
-        background: $panel;
         color: $text-muted;
         display: none;
     }
@@ -169,7 +169,6 @@ class Transcript(VerticalScroll):
     Transcript {
         width: 1fr;
         min-width: 40;
-        border-right: solid $panel;
         padding: 0 1;
     }
     """
@@ -346,12 +345,14 @@ class Transcript(VerticalScroll):
         self._hide_empty_state()
         self._ensure_gap("user")
         # `content_size` excludes this widget's own padding/border, unlike
-        # `size` (the border box) -- `_PromptBand`'s own `padding: 0 2` is the
-        # remaining `-4` to subtract for the text-safe width inside it.
-        width = (self.content_size.width or 74) - 4
-        left = f"[bold]›[/bold] {format.esc(text)}  [dim]{mode}[/dim]"
+        # `size` (the border box); `_PromptBand` adds none of its own.
+        width = self.content_size.width or 74
+        left = f"[bold $accent]›[/bold $accent] {format.esc(text)}  [dim]{mode}[/dim]"
         ts = time.strftime("%H:%M")
         self._mount_widget(_PromptBand(format.right_align(left, f"[dim]{ts}[/dim]", width)))
+
+    def _code_theme(self) -> str:
+        return theme.current_code_theme(self.app)
 
     def add_text_delta(self, text: str) -> None:
         if self._live_assistant is None:
@@ -371,7 +372,7 @@ class Transcript(VerticalScroll):
         round 1's)."""
         if self._live_assistant is None:
             return
-        self._live_assistant.update(_bulleted(Markdown(self._live_text, code_theme="monokai")))
+        self._live_assistant.update(_bulleted(Markdown(self._live_text, code_theme=self._code_theme())))
         self._live_assistant = None
         self._live_text = ""
 
@@ -383,7 +384,7 @@ class Transcript(VerticalScroll):
         if self._live_assistant is None:
             self._ensure_gap("assistant")
             self._live_assistant = self._append("")
-        self._live_assistant.update(_bulleted(Markdown(text, code_theme="monokai")))
+        self._live_assistant.update(_bulleted(Markdown(text, code_theme=self._code_theme())))
         self._live_assistant = None
         self._live_text = ""
 

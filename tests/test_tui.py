@@ -265,6 +265,43 @@ async def test_sidebar_hidden_by_default_and_toggle_persists(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_system_theme_is_the_default_and_paints_no_background():
+    app = make_app()
+    async with app.run_test():
+        assert app.theme == "omega-system"
+        assert app.current_theme.ansi is True
+        assert app.get_css_variables()["rule"] == "ansi_bright_black"
+
+
+@pytest.mark.asyncio
+async def test_theme_command_switches_persists_and_reloads():
+    app = make_app()
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        app.set_focus(prompt)
+        prompt.value = "/theme light"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.theme == "textual-light"
+        assert json.loads(prefs.PATH.read_text())["theme"] == "light"
+
+        prompt.value = "/theme neon"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.theme == "textual-light"
+        assert any("unknown theme: neon" in t for t in _texts(app.query_one(Transcript)))
+
+        prompt.value = "/theme"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert any("theme: light" in t for t in _texts(app.query_one(Transcript)))
+
+    app = make_app()
+    async with app.run_test():
+        assert app.theme == "textual-light"
+
+
+@pytest.mark.asyncio
 async def test_sidebar_command_toggles_too():
     app = make_app()
     async with app.run_test() as pilot:
@@ -278,16 +315,14 @@ async def test_sidebar_command_toggles_too():
 
 @pytest.mark.asyncio
 async def test_ctrl_number_switches_sidebar_tab():
-    from textual.widgets import TabbedContent
-
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.press("ctrl+2")
         await pilot.pause()
-        assert app.query_one(TabbedContent).active == "tab-git"
+        assert app.query_one(Sidebar).active == "tab-git"
         await pilot.press("ctrl+1")
         await pilot.pause()
-        assert app.query_one(TabbedContent).active == "tab-session"
+        assert app.query_one(Sidebar).active == "tab-session"
 
 
 @pytest.mark.asyncio
