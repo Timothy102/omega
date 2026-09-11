@@ -232,7 +232,7 @@ class ModelScreen(WizardScreen):
             m = choice.catalog[alias]
             price_in, price_out = onboarding.PRICES.get(alias, (0.0, 0.0))
             purpose = onboarding.PURPOSES.get(alias, "")
-            text = (f"{alias:<8} {m['model']:<26} {m['context']:>10,}  "
+            text = (f"{alias:<11} {m['model']:<26} {m['context']:>10,}  "
                    f"${price_in:g}/${price_out:g} per M\n[dim]{purpose}[/dim]")
             rendered.append(Option(text, id=alias))
         return rendered

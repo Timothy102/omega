@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.4.0] - 2026-09-11
+
+### Added
+- Multiline TUI composer (`TextArea`): line numbers after wrap, current-line highlight, Enter to send, Shift+Enter for newline, `@` file mentions. Starts one line tall and grows with content.
+- Native macOS composer (`NSTextView`): real caret, click-to-place, drop/paste chips, `@` workspace mentions.
+- `omega keys` and OS-keychain secret storage so API keys no longer live in `config.json`.
+- Catalog aliases: spark, astra, sol, terra, luna, grok.
+
+### Changed
+- Top-level agent cap is 1000 rounds (subagents stay 12 / 6).
+- Local `read` no longer taints the turn; only remote MCP content does.
+- Transcript and status-bar formatting.
+
 ## [0.3.0] - 2026-09-03
 
 The v2 rebuild: a from-scratch harness architecture, a Textual TUI, and the

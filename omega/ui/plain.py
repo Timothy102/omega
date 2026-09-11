@@ -65,7 +65,12 @@ def render(ev: events.Event) -> None:
         case events.TextDelta(text=text):
             console.print(text, end="", markup=False, highlight=False)
         case events.ToolStart():
-            console.print("\n" + format.tool_start(ev), highlight=False)
+            # Width-aware here too: `describe_call` hands over the whole
+            # command now (the TUI has the room to wrap it), so without a
+            # budget a long bash line would run past the terminal instead of
+            # being middle-truncated to fit.
+            console.print("\n" + format.tool_start(ev, width=max(20, console.width - 24)),
+                          highlight=False)
         case events.ToolEnd():
             end_text = format.tool_end(ev)
             if end_text is not None:

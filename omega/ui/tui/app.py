@@ -12,14 +12,15 @@ from typing import Any, cast
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.events import Resize
+from textual.events import Key, Paste, Resize
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Input, Static
+from textual.widgets import Static, TextArea
 from textual.worker import Worker
 
 from ... import compact, config, events, export, gitlog, loop, session, trace
 from ...memory import consolidate
+from .. import composer as composer_lib
 from .. import format
 from . import prefs, theme
 from .history import InputHistory
@@ -130,31 +131,220 @@ class HeaderBar(Static):
         self.update(f"[bold]⌘ omega[/bold]  [dim]{format.esc(tail)}[/dim]\n[$rule]{rule}[/$rule]")
 
 
-class PromptInput(Input):
-    """The `#prompt` input. Textual's `Input` already binds the readline-ish
-    keys most people expect (`ctrl+a/e` home/end, `ctrl+w` delete word back,
-    `ctrl+u` delete-to-start, `ctrl+k` delete-to-end, `ctrl+left/right` word
-    jump) -- this only adds what it lacks: `alt+left/right` word jump,
-    `alt+d` delete word forward, and an idle-only `escape` to clear the
-    line. It also RE-POINTS `alt+backspace`, which Textual's own `Input`
-    binds to `delete_right_word` (deleting forward, the wrong direction for
-    a key most terminals send for "delete the previous word")."""
+class PromptInput(TextArea):
+    """The `#prompt` composer. A real multiline editor (Textual `TextArea`)
+    so you can see which line you're on, insert newlines, and paste a block
+    without it collapsing to one line.
+
+    Submit is Enter (empty-line-at-end also works via the usual "send").
+    Shift+Enter / Alt+Enter / Ctrl+J insert a newline. Escape clears only
+    when idle. Up/down walk input history when the caret is on the first/
+    last line; otherwise they move the caret.
+
+    Word-delete is bound on every key a terminal can actually deliver for it
+    -- `ctrl+w`, `alt+backspace` and `ctrl+backspace`. `cmd`-chords are not
+    among them: macOS reserves the Command modifier for the window manager.
+    """
 
     BINDINGS = [
-        Binding("alt+left", "cursor_left_word", show=False),
-        Binding("alt+right", "cursor_right_word", show=False),
-        Binding("alt+d", "delete_right_word", show=False),
-        Binding("alt+backspace", "delete_left_word", show=False),
-        Binding("escape", "clear_when_idle", show=False),
+        *TextArea.BINDINGS,
+        Binding("enter", "submit", show=False, priority=True),
+        Binding("shift+enter", "newline", show=False, priority=True),
+        Binding("alt+enter", "newline", show=False, priority=True),
+        Binding("ctrl+j", "newline", show=False, priority=True),
+        Binding("alt+left", "cursor_word_left", show=False),
+        Binding("alt+right", "cursor_word_right", show=False),
+        Binding("alt+d", "delete_word_right", show=False),
+        Binding("escape", "clear_when_idle", show=False, priority=True),
+        Binding("up", "history_or_up", show=False, priority=True),
+        Binding("down", "history_or_down", show=False, priority=True),
+        Binding("tab", "mention_or_tab", show=False, priority=True),
     ]
 
+    def __init__(self, **kwargs: Any) -> None:
+        placeholder = kwargs.pop("placeholder", "")
+        super().__init__(
+            "",
+            language=None,
+            soft_wrap=True,
+            tab_behavior="indent",
+            show_line_numbers=False,
+            compact=True,
+            highlight_cursor_line=True,
+            placeholder=placeholder,
+            **kwargs,
+        )
+        self._mention_hits: list[str] = []
+        self._mention_index = 0
+        self._box_min = 3
+        self._box_max = 10
+
+    # Tests and the rest of OmegaApp still talk to `.value` like the old Input.
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        self.text = text
+        self.move_cursor(self.document.end)
+        self._sync_box_height()
+
+    def action_end(self) -> None:
+        self.move_cursor(self.document.end)
+
+    def action_newline(self) -> None:
+        self.insert("\n")
+        self._sync_box_height()
+
+    def action_submit(self) -> None:
+        if self._try_accept_mention():
+            return
+        cast("OmegaApp", self.app)._submit_prompt()
+
     def action_clear_when_idle(self) -> None:
-        # A running turn disables this widget already, so it can't normally
-        # be focused mid-turn -- checked anyway since ctrl+c, not escape, is
-        # the documented way to cancel a running turn.
         if cast("OmegaApp", self.app)._turn_worker is not None:
             return
+        if self._mention_hits:
+            self._mention_hits = []
+            self._mention_index = 0
+            cast("OmegaApp", self.app)._refresh_status()
+            return
         self.clear()
+
+    def action_history_or_up(self) -> None:
+        if self._mention_hits:
+            self._mention_index = (self._mention_index - 1) % len(self._mention_hits)
+            cast("OmegaApp", self.app)._refresh_status()
+            return
+        if self.cursor_at_first_line:
+            cast("OmegaApp", self.app).action_history_prev()
+            return
+        self.action_cursor_up()
+
+    def action_history_or_down(self) -> None:
+        if self._mention_hits:
+            self._mention_index = (self._mention_index + 1) % len(self._mention_hits)
+            cast("OmegaApp", self.app)._refresh_status()
+            return
+        if self.cursor_at_last_line:
+            cast("OmegaApp", self.app).action_history_next()
+            return
+        self.action_cursor_down()
+
+    def action_mention_or_tab(self) -> None:
+        if self._try_accept_mention():
+            return
+        self.insert("    ")
+
+    def _cursor_index(self) -> int:
+        row, col = self.cursor_location
+        lines = self.text.split("\n")
+        return sum(len(line) + 1 for line in lines[:row]) + col
+
+    def _move_to_index(self, index: int) -> None:
+        text = self.text
+        index = max(0, min(index, len(text)))
+        row = text.count("\n", 0, index)
+        last_nl = text.rfind("\n", 0, index)
+        col = index if last_nl < 0 else index - last_nl - 1
+        self.move_cursor((row, col))
+
+    def _try_accept_mention(self) -> bool:
+        if not self._mention_hits:
+            return False
+        path = self._mention_hits[self._mention_index]
+        new, cursor = composer_lib.insert_mention(self.text, self._cursor_index(), path)
+        self.text = new
+        self._move_to_index(cursor)
+        self._mention_hits = []
+        self._mention_index = 0
+        cast("OmegaApp", self.app)._refresh_status()
+        return True
+
+    def on_mount(self) -> None:
+        self._sync_box_height()
+
+    def on_text_area_changed(self) -> None:
+        self._refresh_mentions()
+        self._sync_box_height()
+
+    def _content_rows(self) -> int:
+        text = self.text
+        if not text:
+            return 1
+        rows = text.count("\n") + 1
+        width = self.size.width
+        if width <= 1:
+            return rows
+        gutter = 4 if self.show_line_numbers else 0
+        usable = max(1, width - gutter)
+        extra = 0
+        for line in text.split("\n"):
+            if len(line) > usable:
+                extra += (len(line) - 1) // usable
+        return rows + extra
+
+    def _sync_box_height(self) -> None:
+        rows = self._content_rows()
+        # Border (2) + content. Stay one line until the user actually wraps.
+        height = min(self._box_max, max(self._box_min, rows + 2))
+        parent = self.parent
+        if parent is not None:
+            parent.styles.height = height
+        self.show_line_numbers = rows > 1
+
+    def on_selection_changed(self) -> None:
+        self._refresh_mentions()
+
+    def _refresh_mentions(self) -> None:
+        app = cast("OmegaApp", self.app)
+        q = composer_lib.mention_query(self.text, self._cursor_index())
+        if q is None:
+            if self._mention_hits:
+                self._mention_hits = []
+                self._mention_index = 0
+                app._refresh_status()
+            return
+        hits = composer_lib.rank_files(app.workspace_files, q.query)
+        if hits != self._mention_hits:
+            self._mention_hits = hits
+            self._mention_index = 0
+            app._refresh_status()
+
+    def mention_status(self) -> str:
+        if not self._mention_hits:
+            return ""
+        shown = self._mention_hits[:6]
+        i = self._mention_index
+        bits = []
+        for n, path in enumerate(shown):
+            name = path.rsplit("/", 1)[-1]
+            bits.append(f"[{n + 1}] {name}" if n == i else name)
+        extra = f" +{len(self._mention_hits) - 6}" if len(self._mention_hits) > 6 else ""
+        return " @ " + " · ".join(bits) + extra + "  tab/enter"
+
+    async def _on_key(self, event: Key) -> None:
+        # TextArea inserts a newline for Enter before bindings run. Steal it.
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.action_submit()
+            return
+        if event.key in ("shift+enter", "alt+enter"):
+            event.stop()
+            event.prevent_default()
+            self.action_newline()
+            return
+        await super()._on_key(event)
+
+    async def _on_paste(self, event: Paste) -> None:
+        if event.text:
+            event.stop()
+            event.prevent_default()
+            self.insert(event.text)
+            return
+        await super()._on_paste(event)
 
 
 class OmegaApp(App[None]):
@@ -167,10 +357,14 @@ class OmegaApp(App[None]):
     #main { width: 1fr; height: 1fr; }
     #header { height: 2; }
     #transcript { height: 1fr; padding-top: 1; }
-    #input-box { height: 3; border: round $rule; padding: 0 1; }
+    #input-box { height: 3; min-height: 3; max-height: 10; border: round $rule; padding: 0 1; }
     #input-box:focus-within { border: round $accent; }
-    #mode-tag { width: auto; padding: 0 1 0 0; }
-    #prompt { width: 1fr; background: transparent; }
+    /* A turn in flight: the bracket stays open and typeable, but its border
+       says so, and enter holds rather than submits. */
+    #input-box.-busy { border: round $warning; }
+    #input-box.-busy:focus-within { border: round $warning; }
+    #mode-tag { width: auto; padding: 0 1 0 0; height: 1; }
+    #prompt { width: 1fr; height: 1fr; background: transparent; border: none; padding: 0; }
     #prompt.-plan-mode { color: $warning; }
     #prompt.-discuss-mode { color: $accent; }
     """
@@ -189,8 +383,6 @@ class OmegaApp(App[None]):
         Binding("]", "cycle_tab(True)", "Next tab", show=False),
         Binding("g", "expand_latest", "Expand group", show=False),
         Binding("G", "jump_end", "Jump to end", show=False),
-        Binding("up", "history_prev", "Prev", show=False),
-        Binding("down", "history_next", "Next", show=False),
     ]
 
     def __init__(self, cfg: config.Config, sess: session.Session, mode: str,
@@ -207,6 +399,7 @@ class OmegaApp(App[None]):
         # `eval.prices`, unlike `_usage` above which only holds the latest event.
         self._usage_totals: dict[str, dict[str, int]] = {}
         self._last_model: tuple[str | None, str] | None = None
+        self._held_notice_shown = False
         self._phase = "idle"
         self._turn_worker: Worker[None] | None = None
         self._input_history: InputHistory | None = None
@@ -217,6 +410,7 @@ class OmegaApp(App[None]):
         self.register_theme(theme.SYSTEM_THEME)
         self.theme = theme.textual_theme(self.theme_choice)
         self._git_refresh_timer: Timer | None = None
+        self.workspace_files: list[str] = []
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="body"):
@@ -227,8 +421,10 @@ class OmegaApp(App[None]):
         yield StatusBar(id="status")
         with Horizontal(id="input-box"):
             yield Static("", id="mode-tag")
-            yield PromptInput(id="prompt", placeholder="Ask omega… (shift+tab to change mode)",
-                              compact=True)
+            yield PromptInput(
+                id="prompt",
+                placeholder="Ask omega…  enter send · shift+enter newline · @ file",
+            )
 
     def on_mount(self) -> None:
         # Deferred import: reads the CURRENT `omega.ui.tui.HISTORY`, so tests
@@ -244,7 +440,11 @@ class OmegaApp(App[None]):
             self._show_resumed()
         else:
             self.query_one(Transcript).show_empty_state()
-        self.set_focus(self.query_one("#prompt", Input))
+        self.set_focus(self.query_one("#prompt", PromptInput))
+        self.run_worker(self._index_workspace, exclusive=False, thread=True)
+
+    def _index_workspace(self) -> None:
+        self.workspace_files = composer_lib.list_workspace_files(self.sess.cwd)
 
     def on_resize(self, event: Resize) -> None:
         self._apply_sidebar_visibility()
@@ -298,7 +498,7 @@ class OmegaApp(App[None]):
         return _MODE_ROLE.get(self.mode, "main")
 
     def _apply_mode_style(self) -> None:
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptInput)
         prompt.set_class(self.mode == "plan", "-plan-mode")
         prompt.set_class(self.mode == "discuss", "-discuss-mode")
         style = _MODE_TAG_STYLE.get(self.mode, "dim")
@@ -317,9 +517,15 @@ class OmegaApp(App[None]):
                 alias, model = self.model_alias, "?"
             self.query_one(Sidebar).session_tab.record_model(alias, model, limit=self._static_context_limit())
         turns = sum(1 for m in self.history if m.get("role") == "user")
+        note = ""
+        try:
+            note = self.query_one("#prompt", PromptInput).mention_status()
+        except Exception:
+            note = ""
         state = StatusState(mode=self.mode, role_name=role_name, model=model, alias=alias,
                             session_id=self.sess.id, turns=turns, usage=self._usage,
-                            phase=self._phase, sidebar_auto_hidden=self._sidebar_auto_hidden())
+                            phase=self._phase, sidebar_auto_hidden=self._sidebar_auto_hidden(),
+                            note=note)
         self.query_one(StatusBar).set_state(state)
 
     def _static_context_limit(self) -> int:
@@ -447,11 +653,26 @@ class OmegaApp(App[None]):
             lines.append(f"total: ${grand_total:.4f}{suffix}")
         return "\n".join(lines)
 
-    def on_input_submitted(self, message: Input.Submitted) -> None:
-        if message.input.id != "prompt":
+    def _submit_prompt(self) -> None:
+        prompt = self.query_one("#prompt", PromptInput)
+        # Mid-turn, enter is a no-op that KEEPS what was typed. The widget
+        # used to be disabled outright for the length of a turn, which meant
+        # a thought had to be held in the reader's head until the turn ended.
+        # Leaving it live lets that thought be written down where it belongs;
+        # refusing the submit (rather than queueing or interrupting) keeps the
+        # running turn the only thing in flight, so nothing is sent that the
+        # turn's own output might have made wrong.
+        if self._turn_worker is not None:
+            # Once per turn, not once per keypress -- enter pressed five times
+            # while waiting should not push five identical notices into the
+            # transcript the reader is trying to follow.
+            if not self._held_notice_shown:
+                self._held_notice_shown = True
+                self.query_one(Transcript).add_dim(
+                    "still working — your prompt is held; ctrl+c cancels the turn")
             return
-        text = message.value.strip()
-        message.input.value = ""
+        text = prompt.value.strip()
+        prompt.value = ""
         if not text:
             return
         if self._input_history is not None:
@@ -671,7 +892,8 @@ class OmegaApp(App[None]):
         self.history.append({"role": "user", "content": text})
         self.query_one(Transcript).add_user_message(text, self.mode)
         self.query_one(Sidebar).session_tab.reset_turn()
-        self.query_one("#prompt", Input).disabled = True
+        self.query_one("#input-box").add_class("-busy")
+        self._held_notice_shown = False
         self._turn_worker = self.run_worker(self._run_turn(), exclusive=True, thread=False)
 
     async def _run_turn(self) -> None:
@@ -697,16 +919,15 @@ class OmegaApp(App[None]):
             sidebar.git_tab.refresh_repos()
             sidebar.connections_tab.refresh_status()
             self._refresh_header(force=True)
-            prompt = self.query_one("#prompt", Input)
-            prompt.disabled = False
-            self.set_focus(prompt)
+            self.query_one("#input-box").remove_class("-busy")
+            self.set_focus(self.query_one("#prompt", PromptInput))
 
     def action_interrupt(self) -> None:
         if self._turn_worker is not None:
             self._turn_worker.cancel()
 
     def action_quit_app(self) -> None:
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptInput)
         if prompt.value:
             prompt.action_delete_right()
             return
@@ -723,7 +944,7 @@ class OmegaApp(App[None]):
     def _cycle_history(self, forward: bool) -> None:
         if self._input_history is None:
             return
-        prompt = self.query_one("#prompt", Input)
+        prompt = self.query_one("#prompt", PromptInput)
         value = (self._input_history.next(prompt.value) if forward
                  else self._input_history.prev(prompt.value))
         if value is not None:

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from . import secrets
+
 CONFIG_PATH = Path(os.environ.get("OMEGA_CONFIG", Path.home() / ".omega" / "config.json"))
 
 DEFAULTS: dict[str, Any] = {
@@ -21,6 +23,10 @@ DEFAULTS: dict[str, Any] = {
             "type": "anthropic",
             "apiKeyEnv": "ANTHROPIC_API_KEY",
         },
+        "openai": {
+            "baseUrl": "https://api.openai.com/v1",
+            "apiKeyEnv": "OPENAI_API_KEY",
+        },
     },
     "models": {
         "fable":  {"model": "claude-fable-5-1", "provider": "anthropic", "context": 1048576,
@@ -34,6 +40,20 @@ DEFAULTS: dict[str, Any] = {
                    "fallback": "kimi"},
         "kimi":   {"model": "moonshotai/kimi-k3", "provider": "openrouter", "context": 1048576},
         "glm":    {"model": "z-ai/glm-5.3-flash", "provider": "openrouter", "context": 128000},
+        # GPT-6 Astra is in limited rollout and not on OpenRouter yet, so it
+        # needs the native OpenAI provider; the GPT-5.6 tiers are on both.
+        "astra":  {"model": "gpt-6-astra", "provider": "openai", "context": 1050000,
+                   "fallback": "sol"},
+        "sol":    {"model": "openai/gpt-5.6-sol", "provider": "openrouter", "context": 1050000,
+                   "fallback": "terra"},
+        "terra":  {"model": "openai/gpt-5.6-terra", "provider": "openrouter", "context": 1050000,
+                   "fallback": "luna"},
+        "luna":   {"model": "openai/gpt-5.6-luna", "provider": "openrouter", "context": 1050000},
+        "codex":  {"model": "openai/gpt-5.3-codex", "provider": "openrouter", "context": 400000,
+                   "fallback": "sol"},
+        "grok":   {"model": "x-ai/grok-4.6", "provider": "openrouter", "context": 500000,
+                   "fallback": "grok-build"},
+        "grok-build": {"model": "x-ai/grok-build-0.1", "provider": "openrouter", "context": 256000},
     },
     "roles": {
         "main":          {"alias": "opus"},
@@ -53,25 +73,58 @@ class Provider:
     base_url: str = ""
     api_key_env: str = ""
     api_key_literal: str = ""
+    api_key_cmd: str = ""
+
+    def _resolve(self) -> str:
+        """The key, or "" if nothing supplies one.
+
+        Order is most-explicit-first: a literal in the config, then a command,
+        then an environment variable, then the OS keychain. The keychain is
+        last because it is the one source the config does not mention -- so a
+        key written down in front of you always beats one found by
+        convention, and `omega keys migrate` can move a literal into the
+        keychain without the two fighting over which wins."""
+        if self.api_key_literal:
+            return self.api_key_literal
+        if self.api_key_cmd:
+            return secrets.from_command(self.api_key_cmd)
+        if self.api_key_env:
+            from_env = os.environ.get(self.api_key_env, "")
+            if from_env:
+                return from_env
+        return secrets.keychain_get(self.name) or ""
 
     @property
     def has_key(self) -> bool:
         """Non-raising check -- lets callers (onboarding, first-run detection)
         probe key availability without triggering the SystemExit below."""
-        return bool(self.api_key_literal
-                   or (self.api_key_env and os.environ.get(self.api_key_env)))
+        try:
+            return bool(self._resolve())
+        except RuntimeError:
+            # A broken `apiKeyCmd` is a real misconfiguration, but this
+            # property exists precisely so probing cannot blow up its caller.
+            return False
+
+    @property
+    def key_source(self) -> str:
+        """Where the key comes from, for `omega keys` and `omega doctor`.
+        Never the value itself."""
+        return secrets.describe_source(self.api_key_env, self.api_key_cmd,
+                                       self.api_key_literal, self.name)
 
     @property
     def api_key(self) -> str:
         # Resolved lazily -- at load() time we don't yet know which providers a
         # session will actually use, and a provider with no key configured must
         # not block startup for users who haven't set it up yet.
-        if self.api_key_literal:
-            return self.api_key_literal
-        key = os.environ.get(self.api_key_env, "") if self.api_key_env else ""
+        try:
+            key = self._resolve()
+        except RuntimeError as e:
+            raise SystemExit(f"omega: could not read the API key for provider "
+                             f"{self.name!r}: {secrets.redact(str(e))}") from None
         if not key:
             hint = (f"export {self.api_key_env}=..." if self.api_key_env
-                    else f'set "apiKey" in {CONFIG_PATH}')
+                    else f"omega keys set {self.name}")
             raise SystemExit(
                 f"omega: no API key for provider {self.name!r}.\n"
                 f"  Run `omega setup` to configure one, or {hint}")
@@ -174,6 +227,7 @@ def load() -> Config:
             name=name, type=ptype, base_url=base_url,
             api_key_env=p.get("apiKeyEnv", ""),
             api_key_literal=p.get("apiKey", ""),
+            api_key_cmd=p.get("apiKeyCmd", ""),
         )
 
     models: dict[str, Model] = {}

@@ -122,8 +122,20 @@ built in). The built-in catalog:
 | `opus` | `claude-opus-5` | anthropic | 1M |
 | `sonnet` | `claude-sonnet-5` | anthropic | 1M |
 | `haiku` | `claude-haiku-4-5` | anthropic | 200k |
+| `spark` | `meta/muse-spark-1.3` | openrouter-style | 1M |
 | `kimi` | `moonshotai/kimi-k3` | openrouter-style | 1M |
 | `glm` | `z-ai/glm-5.3-flash` | openrouter-style | 128k |
+| `astra` | `gpt-6-astra` | openai (native) | 1M |
+| `sol` | `openai/gpt-5.6-sol` | openrouter-style | 1M |
+| `terra` | `openai/gpt-5.6-terra` | openrouter-style | 1M |
+| `luna` | `openai/gpt-5.6-luna` | openrouter-style | 1M |
+| `codex` | `openai/gpt-5.3-codex` | openrouter-style | 400k |
+| `grok` | `x-ai/grok-4.6` | openrouter-style | 500k |
+| `grok-build` | `x-ai/grok-build-0.1` | openrouter-style | 256k |
+
+GPT-6 Astra is in limited rollout and not listed on OpenRouter yet, so `astra`
+only appears once an `openai` provider (`OPENAI_API_KEY`) is configured.
+Cursor's Composer has no public API and cannot be added.
 
 `omega models` prints the catalog with each role's current default.
 `omega --model <alias-or-model-id>` overrides `main` and `plan` for the

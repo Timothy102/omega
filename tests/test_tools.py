@@ -89,29 +89,42 @@ async def test_grep_distinguishes_no_matches_from_bad_regex(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_reading_outside_the_repo_taints_the_turn(tmp_path):
+async def test_reading_a_local_file_outside_cwd_does_not_taint(tmp_path):
+    """Local files are the user's own (worktree edits, /tmp pastes). Only
+    remote MCP content taints; tainting on any read outside cwd used to
+    force a bash confirm on every worktree turn."""
     tools.set_tainted(False)
-    await tools.run(call("read", path="/etc/hosts", limit=1))
-    assert tools.TAINTED
-    assert "confirmation" in await tools.run(call("bash", command="echo hi"))
+    out = await tools.run(call("read", path="/etc/hosts", limit=1))
+    assert "error" not in out.lower() or "hosts" in out.lower()
+    assert tools.TAINTED is False
+    bash_out = await tools.run(call("bash", command="echo hi"))
+    assert "hi" in bash_out
+    assert "confirmation" not in bash_out
 
 
 @pytest.mark.asyncio
 async def test_concurrent_asks_for_the_same_rule_prompt_only_once():
     """Regression: both calls computed their ASK verdict before either
     prompt was answered, so choosing "always" on the first still left the
-    second waiting on its own (stale) prompt instead of reusing the rule."""
+    second waiting on its own (stale) prompt instead of reusing the rule.
+
+    bash no longer ASKs (permissions relaxed to the shell); `call_tool` is
+    the remaining ASK surface, and one "always" covers the whole MCP server.
+    """
     prompted = []
 
     async def confirm_always(name, args, why):
-        prompted.append(args["command"])
+        prompted.append(args["name"])
         permissions.remember(permissions.rule_for(name, args), permissions.ALLOW)
         return True
     tools.CONFIRM = confirm_always
 
+    import json
     await asyncio.gather(
-        tools.run(call("bash", command="customcmd one")),
-        tools.run(call("bash", command="customcmd two")),
+        tools.run(ToolCall("a", "call_tool",
+                           json.dumps({"name": "mcp__somedb__write_row", "arguments": {}}))),
+        tools.run(ToolCall("b", "call_tool",
+                           json.dumps({"name": "mcp__somedb__delete_row", "arguments": {}}))),
     )
 
     assert len(prompted) == 1

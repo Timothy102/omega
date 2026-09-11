@@ -70,14 +70,15 @@ def test_render_tool_start_indents_when_subagent_id_set(isolate_console):
                           subagent_id="a1b2c3", tier="fast")
     plain.render(ev)
     out = isolate_console.getvalue()
-    assert "grep" in out and "foo" in out and "fast" in out and "a1b2c3" in out
+    assert "Grep" in out and "foo" in out and "fast" in out and "a1b2c3" in out
 
 
-def test_render_tool_start_does_not_repeat_the_tool_name(isolate_console):
+def test_render_tool_start_reads_as_a_call(isolate_console):
     ev = events.ToolStart(call_id="c1", name="bash", args_preview="bash  $ ls -la")
     plain.render(ev)
     out = isolate_console.getvalue()
-    assert out.count("bash") == 1
+    assert "Bash(ls -la)" in out
+    assert out.count("Bash") == 1
 
 
 def test_render_recall_outcome_prints_memory_count(isolate_console):

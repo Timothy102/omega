@@ -37,7 +37,7 @@ def _make_repo(tmp_path: Path) -> Path:
 
 
 async def _fake_run_agent_ok(cfg, role_name, system, history, tool_names=None,
-                             emit=None, max_rounds=60, subagent_id=None, tier=None, role=None):
+                             emit=None, max_rounds=1000, subagent_id=None, tier=None, role=None):
     emit = emit or (lambda e: None)
     emit(events.ModelUsed(alias="opus", model="fake-model", provider="fake"))
     emit(events.Phase("waiting"))
@@ -93,7 +93,7 @@ async def test_run_one_failing_check(tmp_path: Path, monkeypatch: pytest.MonkeyP
 async def test_run_one_timeout_marks_failed_without_running_check(tmp_path: Path,
                                                                    monkeypatch: pytest.MonkeyPatch):
     async def slow(cfg, role_name, system, history, tool_names=None, emit=None,
-                   max_rounds=60, subagent_id=None, tier=None, role=None):
+                   max_rounds=1000, subagent_id=None, tier=None, role=None):
         await asyncio.sleep(5)
         return "never"
 

@@ -9,6 +9,13 @@ PRICES: dict[str, tuple[float, float]] = {
     "spark":  (1.25, 4.25),
     "kimi":   (3.0, 15.0),
     "glm":    (0.6, 2.2),
+    "astra":  (10.0, 50.0),
+    "sol":    (2.0, 10.0),
+    "terra":  (2.0, 12.0),
+    "luna":   (0.2, 1.2),
+    "codex":  (1.75, 14.0),
+    "grok":   (2.0, 6.0),
+    "grok-build": (1.0, 2.0),
 }
 
 

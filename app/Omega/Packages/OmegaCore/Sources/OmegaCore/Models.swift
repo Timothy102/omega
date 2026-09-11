@@ -52,11 +52,18 @@ public struct OmegaTask: Codable, Sendable, Equatable, Identifiable {
     public var lastActivityAt: Double?
 
     private enum CodingKeys: String, CodingKey {
-        case id, title
-        case repoPath = "repo_path", repoName = "repo_name", branch, status, model, mode
-        case worktreePath = "worktree_path", pr
-        case tokensUsed = "tokens_used", costUsd = "cost_usd"
-        case createdAt = "created_at", updatedAt = "updated_at", lastActivityAt = "last_activity_at"
+        case id, title, repo, cwd, worktree, branch, status, model, mode, pr
+        case repoPath = "repo_path"
+        case repoName = "repo_name"
+        case worktreePath = "worktree_path"
+        case tokensUsed = "tokens_used"
+        case tokensIn = "tokens_in"
+        case tokensOut = "tokens_out"
+        case costUsd = "cost_usd"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case lastActivityAt = "last_activity_at"
+        case created, updated
     }
 
     public init(
@@ -82,9 +89,74 @@ public struct OmegaTask: Codable, Sendable, Equatable, Identifiable {
         self.lastActivityAt = lastActivityAt
     }
 
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        let repo = try c.decodeIfPresent(String.self, forKey: .repo)
+        let repoPathKey = try c.decodeIfPresent(String.self, forKey: .repoPath)
+        let cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+        repoPath = repoPathKey ?? repo ?? cwd ?? ""
+        repoName = try c.decodeIfPresent(String.self, forKey: .repoName)
+            ?? URL(fileURLWithPath: repoPath).lastPathComponent
+        branch = try c.decodeIfPresent(String.self, forKey: .branch) ?? ""
+        status = try c.decodeIfPresent(TaskStatus.self, forKey: .status) ?? .idle
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? "opus"
+        mode = try c.decodeIfPresent(TaskMode.self, forKey: .mode) ?? .build
+        let explicitWorktree = try c.decodeIfPresent(String.self, forKey: .worktreePath)
+        let usesWorktree = try c.decodeIfPresent(Bool.self, forKey: .worktree) ?? false
+        if let explicitWorktree, !explicitWorktree.isEmpty {
+            worktreePath = explicitWorktree
+        } else if usesWorktree, let cwd, !cwd.isEmpty {
+            worktreePath = cwd
+        } else if let cwd, !cwd.isEmpty, cwd != repoPath {
+            worktreePath = cwd
+        } else {
+            worktreePath = nil
+        }
+        pr = try c.decodeIfPresent(PullRequest.self, forKey: .pr)
+        if let used = try c.decodeIfPresent(Int.self, forKey: .tokensUsed) {
+            tokensUsed = used
+        } else {
+            let tin = try c.decodeIfPresent(Int.self, forKey: .tokensIn) ?? 0
+            let tout = try c.decodeIfPresent(Int.self, forKey: .tokensOut) ?? 0
+            tokensUsed = (tin + tout) > 0 ? tin + tout : nil
+        }
+        costUsd = try c.decodeIfPresent(Double.self, forKey: .costUsd)
+        createdAt = try c.decodeIfPresent(Double.self, forKey: .createdAt)
+            ?? c.decodeIfPresent(Double.self, forKey: .created)
+            ?? 0
+        updatedAt = try c.decodeIfPresent(Double.self, forKey: .updatedAt)
+            ?? c.decodeIfPresent(Double.self, forKey: .updated)
+            ?? createdAt
+        lastActivityAt = try c.decodeIfPresent(Double.self, forKey: .lastActivityAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encode(repoPath, forKey: .repoPath)
+        try c.encode(repoName, forKey: .repoName)
+        try c.encode(branch, forKey: .branch)
+        try c.encode(status, forKey: .status)
+        try c.encode(model, forKey: .model)
+        try c.encode(mode, forKey: .mode)
+        try c.encodeIfPresent(worktreePath, forKey: .worktreePath)
+        try c.encodeIfPresent(pr, forKey: .pr)
+        try c.encodeIfPresent(tokensUsed, forKey: .tokensUsed)
+        try c.encodeIfPresent(costUsd, forKey: .costUsd)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encodeIfPresent(lastActivityAt, forKey: .lastActivityAt)
+    }
+
     public var elapsedSeconds: Double {
         Date().timeIntervalSince1970 - createdAt
     }
+
+    /// Directory the agent actually works in — worktree when present, else the repo.
+    public var workspaceRoot: String { worktreePath ?? repoPath }
 }
 
 /// Confirmed daemon shape for `POST /api/terminals` is `{id, pid, cwd, created}`; `task_id`,

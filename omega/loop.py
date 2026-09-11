@@ -288,7 +288,7 @@ def _volatile_block(history: list[Message]) -> str:
 async def run_agent(cfg: Config, role_name: str, system: str, history: list[Message],
                     tool_names: set[str] | None = None,
                     emit: Callable[[events.Event], None] | None = None,
-                    max_rounds: int = 60, subagent_id: str | None = None,
+                    max_rounds: int = 1000, subagent_id: str | None = None,
                     tier: str | None = None, role: Role | None = None,
                     verify_enabled: bool = False, turn_number: int | None = None) -> str:
     """`system` is the STABLE half of the prompt -- see VOLATILE_MARKER. The

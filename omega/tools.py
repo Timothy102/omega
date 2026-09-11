@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import inspect
 import os
 import re
@@ -203,7 +204,7 @@ def _write(path: str, content: str) -> str:
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
-    return f"wrote {len(content)} chars to {p}"
+    return f"wrote {len(content.splitlines())} lines ({len(content)} chars) to {p}"
 
 
 @tool("edit", "Replace an exact unique string in a file.",
@@ -216,8 +217,29 @@ def _edit(path: str, old: str, new: str) -> str:
         raise ValueError("string not found")
     if n > 1:
         raise ValueError(f"string appears {n} times; make it unique")
-    p.write_text(text.replace(old, new))
-    return f"edited {p}"
+    updated = text.replace(old, new)
+    p.write_text(updated)
+    return f"edited {p}\n{_diff(text, updated, str(p))}"
+
+
+# Enough to show an ordinary edit whole, bounded so a large mechanical
+# replacement cannot push the rest of the turn out of context.
+_DIFF_LINES = 40
+
+
+def _diff(before: str, after: str, path: str) -> str:
+    """A unified diff of what the edit actually changed.
+
+    Returned to the model, not just drawn for the human: `edited <path>` gave
+    it no way to tell a correct replacement from one that matched in an
+    unintended place, so it re-read the file after nearly every edit. The
+    diff answers that in a fraction of the tokens the re-read cost."""
+    lines = list(difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                      fromfile=path, tofile=path, lineterm="", n=2))
+    body = lines[2:]  # the ---/+++ header repeats the path already on the row
+    if len(body) > _DIFF_LINES:
+        body = body[:_DIFF_LINES] + [f"... [{len(body) - _DIFF_LINES} more diff lines]"]
+    return "\n".join(body)
 
 
 @tool("bash", "Run a shell command. Returns combined stdout+stderr. Pass "

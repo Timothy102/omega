@@ -9,13 +9,15 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.table import Table
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from omega import artifacts, compact, events, gitlog, loop, session
 from omega.config import Model
-from omega.ui import tui
+from omega.ui import format, tui
 from omega.ui.tui import app as app_module
 from omega.ui.tui import prefs
+from omega.ui.tui import transcript as transcript_module
+from omega.ui.tui.app import PromptInput
 from omega.ui.tui.modals import (
     AskUserScreen,
     ConfirmScreen,
@@ -85,6 +87,7 @@ def isolate(tmp_path, monkeypatch):
     # dir; keep it hermetic and reset the process-lifetime cache per test.
     monkeypatch.setattr(app_module, "_lookup_branch", _fake_lookup_branch)
     monkeypatch.setattr(app_module, "_branch_cache", {})
+    monkeypatch.setattr(app_module.composer_lib, "list_workspace_files", lambda root: [])
     yield
 
 
@@ -146,7 +149,7 @@ async def test_submit_streams_reply_offloads_and_updates_state(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "hello"
         await pilot.press("enter")
@@ -154,8 +157,8 @@ async def test_submit_streams_reply_offloads_and_updates_state(monkeypatch):
 
         texts = _texts(app.query_one(Transcript))
         assert any("Hello world" in t for t in texts)
-        # The offload renders as its own dim "└" sub-line beneath the call.
-        assert any("4.2k chars" in t and "deadbeef" in t and "└" in t for t in texts)
+        # The offload renders in the call's own result column beneath it.
+        assert any("4.2k chars" in t and "deadbeef" in t and "⎿" in t for t in texts)
         assert not any(t.strip().startswith("↳") for t in texts)
 
         sidebar = app.query_one(Sidebar)
@@ -189,7 +192,7 @@ async def test_live_status_line_shows_thinking_then_clears_on_idle(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "hello"
         await pilot.press("enter")
@@ -224,7 +227,7 @@ async def test_more_than_three_tool_calls_collapse_and_expand(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "go"
         await pilot.press("enter")
@@ -277,7 +280,7 @@ async def test_system_theme_is_the_default_and_paints_no_background():
 async def test_theme_command_switches_persists_and_reloads():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/theme light"
         await pilot.press("enter")
@@ -305,7 +308,7 @@ async def test_theme_command_switches_persists_and_reloads():
 async def test_sidebar_command_toggles_too():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/sidebar"
         await pilot.press("enter")
@@ -353,7 +356,7 @@ async def test_git_tab_renders_repos_from_gitlog(monkeypatch):
 async def test_plan_command_flips_mode_and_status_bar():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/plan"
         await pilot.press("enter")
@@ -362,7 +365,7 @@ async def test_plan_command_flips_mode_and_status_bar():
         assert app.mode == "plan"
         assert "plan" in str(app.query_one(StatusBar).content)
         assert prompt.has_class("-plan-mode")
-        assert prompt.placeholder == "Ask omega… (shift+tab to change mode)"
+        assert "Ask omega" in str(prompt.placeholder)
         assert "plan" in str(app.query_one("#mode-tag", Static).content)
 
 
@@ -370,7 +373,7 @@ async def test_plan_command_flips_mode_and_status_bar():
 async def test_unknown_command_suggests_closest_match():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/mdoel"
         await pilot.press("enter")
@@ -384,7 +387,7 @@ async def test_unknown_command_suggests_closest_match():
 async def test_help_command_prints_cheat_sheet():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/help"
         await pilot.press("enter")
@@ -453,7 +456,7 @@ async def test_confirm_modal_y_allows():
 async def test_model_command_opens_picker_and_selecting_updates_state():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/model"
         await pilot.press("enter")
@@ -488,7 +491,7 @@ async def test_discuss_command_switches_mode_when_available(monkeypatch):
     monkeypatch.setattr(loop, "MODES", {**loop.MODES, "discuss": ("system", None)})
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/discuss"
         await pilot.press("enter")
@@ -504,7 +507,7 @@ async def test_discuss_command_falls_back_when_unavailable(monkeypatch):
     monkeypatch.setattr(loop, "MODES", {"build": ("s", None), "plan": ("s", None)})
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/discuss"
         await pilot.press("enter")
@@ -532,7 +535,7 @@ async def test_empty_state_shown_on_fresh_session_and_cleared_on_first_prompt():
         texts = _texts(app.query_one(Transcript))
         assert any("ask anything about this repo" in t for t in texts)
 
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "hello"
         await pilot.press("enter")
@@ -635,7 +638,7 @@ async def test_more_line_is_focusable_and_expands_via_action(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "go"
         await pilot.press("enter")
@@ -663,7 +666,7 @@ async def test_cost_command_shows_tokens_and_price_by_model(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "go"
         await pilot.press("enter")
@@ -683,7 +686,7 @@ async def test_cost_command_shows_tokens_and_price_by_model(monkeypatch):
 async def test_cost_command_with_no_usage_yet():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/cost"
         await pilot.press("enter")
@@ -696,7 +699,7 @@ async def test_cost_command_with_no_usage_yet():
 async def test_export_command_writes_markdown_and_prints_path(tmp_path):
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         app.history.append({"role": "user", "content": "hello there"})
         target = tmp_path / "out.md"
@@ -721,7 +724,7 @@ async def test_compact_command_triggers_and_shows_the_note(monkeypatch):
     monkeypatch.setattr(compact, "maybe_compact", fake_maybe_compact)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/compact"
         await pilot.press("enter")
@@ -740,7 +743,7 @@ async def test_compact_command_reports_nothing_to_compact(monkeypatch):
     monkeypatch.setattr(compact, "maybe_compact", fake_maybe_compact)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/compact"
         await pilot.press("enter")
@@ -763,7 +766,7 @@ async def test_undo_confirms_then_calls_checkpoint_undo(monkeypatch):
 
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/undo"
         await pilot.press("enter")
@@ -785,7 +788,7 @@ async def test_undo_with_n_steps_is_parsed_and_cancel_skips_checkpoint(monkeypat
 
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/undo 3"
         await pilot.press("enter")
@@ -823,7 +826,7 @@ async def test_undo_not_available_when_checkpoint_module_is_missing(monkeypatch)
     monkeypatch.setattr("builtins.__import__", _block_relative_import("checkpoint"))
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/undo"
         await pilot.press("enter")
@@ -837,7 +840,7 @@ async def test_verify_not_available_when_verify_module_is_missing(monkeypatch):
     monkeypatch.setattr("builtins.__import__", _block_relative_import("verify"))
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/verify"
         await pilot.press("enter")
@@ -854,7 +857,7 @@ async def test_diff_command_opens_diffscreen_with_checkpoint_diff(monkeypatch):
 
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/diff"
         await pilot.press("enter")
@@ -873,7 +876,7 @@ async def test_verify_command_shows_verified_summary(monkeypatch):
 
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/verify"
         await pilot.press("enter")
@@ -890,7 +893,7 @@ async def test_verify_command_no_checks_detected(monkeypatch):
 
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/verify"
         await pilot.press("enter")
@@ -907,7 +910,7 @@ async def test_sessions_command_lists_and_resumes(tmp_path):
     other.save()
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/sessions"
         await pilot.press("enter")
@@ -924,7 +927,7 @@ async def test_sessions_command_lists_and_resumes(tmp_path):
 async def test_sessions_command_reports_when_none_for_this_directory():
     app = make_app()
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "/sessions"
         await pilot.press("enter")
@@ -949,7 +952,7 @@ async def test_emit_renders_checkpoint_verified_job_events(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "go"
         await pilot.press("enter")
@@ -977,7 +980,7 @@ async def test_emit_survives_a_render_error_and_shows_a_marker(monkeypatch):
     monkeypatch.setattr(loop, "run_turn", fake_run_turn)
 
     async with app.run_test() as pilot:
-        prompt = app.query_one("#prompt", Input)
+        prompt = app.query_one("#prompt", PromptInput)
         app.set_focus(prompt)
         prompt.value = "go"
         await pilot.press("enter")
@@ -986,3 +989,198 @@ async def test_emit_survives_a_render_error_and_shows_a_marker(monkeypatch):
         blob = "\n".join(_texts(app.query_one(Transcript)))
         assert "render error" in blob
         assert "RuntimeError" in blob
+
+
+# ---- tool blocks -------------------------------------------------------------
+
+def _end(call_id, name, result, outcome, duration=0.1):
+    return events.ToolEnd(call_id=call_id, name=name, result_preview=result,
+                          duration_s=duration, offloaded=False, artifact_id=None,
+                          result_chars=len(result), outcome=outcome)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_block_shows_the_tools_own_output():
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_tool_start(events.ToolStart(call_id="c1", name="grep",
+                                          args_preview="grep  /needle/  in ."))
+        t.add_tool_end(_end("c1", "grep", "src/a.py:1:needle\nsrc/b.py:2:needle",
+                            "→ 2 matches"))
+        await pilot.pause()
+        text = "\n".join(_texts(t))
+        # The evidence itself, not just a count of it.
+        assert "src/a.py:1:needle" in text
+        assert "2 matches" in text
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_outcomes_land_on_their_own_blocks():
+    # Three rows mounted separately used to collect all three outcomes at the
+    # bottom, under whichever row happened to finish last.
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        for i in (1, 2):
+            t.add_tool_start(events.ToolStart(call_id=f"c{i}", name="grep",
+                                              args_preview=f"grep  /pattern{i}/  in ."))
+        t.add_tool_end(_end("c2", "grep", "", "→ second done"))
+        t.add_tool_end(_end("c1", "grep", "", "→ first done"))
+        await pilot.pause()
+        blocks = [b for b in t.query(Static) if b.__class__.__name__ == "_ToolBlock"]
+        assert len(blocks) == 2
+        rendered = [str(b.content) for b in blocks]
+        assert "pattern1" in rendered[0] and "first done" in rendered[0]
+        assert "pattern2" in rendered[1] and "second done" in rendered[1]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_marks_its_row_and_rails_the_message():
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_tool_start(events.ToolStart(call_id="c1", name="read",
+                                          args_preview="read  missing.py"))
+        t.add_tool_end(_end("c1", "read", "error: nope", "→ error: FileNotFoundError: nope"))
+        await pilot.pause()
+        text = "\n".join(_texts(t))
+        assert format.ERROR_GLYPH in text
+        assert "FileNotFoundError" in text
+
+
+@pytest.mark.asyncio
+async def test_expanding_a_block_reveals_the_rest_of_the_result():
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_tool_start(events.ToolStart(call_id="c1", name="grep",
+                                          args_preview="grep  /x/  in ."))
+        t.add_tool_end(_end("c1", "grep", "\n".join(f"hit {i}" for i in range(12)),
+                            "→ 12 matches"))
+        await pilot.pause()
+        block = next(b for b in t.query(Static) if b.__class__.__name__ == "_ToolBlock")
+        assert "hit 11" not in str(block.content)
+        block.action_expand()
+        await pilot.pause()
+        assert "hit 11" in str(block.content)
+
+
+# ---- typing during a running turn --------------------------------------------
+
+@pytest.mark.asyncio
+async def test_the_prompt_stays_typeable_while_a_turn_runs(monkeypatch):
+    app = make_app()
+    reached = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def fake_run_turn(cfg, history, *, mode, emit, model=None):
+        emit(events.Phase("thinking"))
+        reached.set()
+        await resume.wait()
+        emit(events.Done(""))
+
+    monkeypatch.setattr(loop, "run_turn", fake_run_turn)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", PromptInput)
+        app.set_focus(prompt)
+        prompt.value = "first"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: reached.is_set())
+
+        assert not prompt.disabled
+        app.set_focus(prompt)
+        prompt.value = "a thought I had mid-turn"
+        await pilot.press("enter")
+        await pilot.pause()
+        # Enter is refused, not swallowed: the text survives for the reader
+        # to send once the turn ends.
+        assert prompt.value == "a thought I had mid-turn"
+        assert app._turn_worker is not None
+
+        resume.set()
+        await _wait_for(pilot, lambda: app._turn_worker is None)
+        assert prompt.value == "a thought I had mid-turn"
+
+
+@pytest.mark.asyncio
+async def test_escape_does_not_discard_a_prompt_typed_mid_turn(monkeypatch):
+    app = make_app()
+    reached = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def fake_run_turn(cfg, history, *, mode, emit, model=None):
+        emit(events.Phase("thinking"))
+        reached.set()
+        await resume.wait()
+        emit(events.Done(""))
+
+    monkeypatch.setattr(loop, "run_turn", fake_run_turn)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", PromptInput)
+        app.set_focus(prompt)
+        prompt.value = "go"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: reached.is_set())
+
+        app.set_focus(prompt)
+        prompt.value = "keep me"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert prompt.value == "keep me"
+
+        resume.set()
+        await _wait_for(pilot, lambda: app._turn_worker is None)
+
+
+# ---- the streaming read-cursor ------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_streaming_text_carries_a_cursor_on_the_newest_character():
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_text_delta("the file lives at")
+        await pilot.pause()
+        assert transcript_module._CURSOR in "\n".join(_texts(t))
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_lingers_after_the_turn_ends():
+    # The default linger, not a shortened one: the point of the test is that
+    # the marker outlives the last delta long enough to be seen.
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_text_delta("done")
+        t.finalize_turn("done")
+        await pilot.pause()
+        assert transcript_module._CURSOR in "\n".join(_texts(t))
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_clears_once_the_linger_expires(monkeypatch):
+    monkeypatch.setattr(transcript_module, "_CURSOR_LINGER", 0.02)
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_text_delta("done")
+        t.finalize_turn("done")
+        await _wait_for(pilot, lambda: transcript_module._CURSOR
+                        not in "\n".join(_texts(t)))
+        assert "done" in "\n".join(_texts(t))
+
+
+@pytest.mark.asyncio
+async def test_going_idle_stops_the_heartbeat():
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_text_delta("hi")
+        await pilot.pause()
+        assert t._cursor_timer is not None
+        t.note_phase("idle")
+        await pilot.pause()
+        assert t._cursor_timer is None

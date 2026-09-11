@@ -67,7 +67,7 @@ async def test_onboard_openrouter_writes_working_config(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_onboard_other_openai_compatible_asks_for_url_and_model(monkeypatch):
-    queue_input(monkeypatch, ["3", "https://api.example.com/v1", "big-model-v1"])
+    queue_input(monkeypatch, ["4", "https://api.example.com/v1", "big-model-v1"])
     queue_getpass(monkeypatch, "example-key")
     monkeypatch.setattr(loop, "run_agent", fake_run_agent)
 

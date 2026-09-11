@@ -26,6 +26,9 @@ async def main() -> None:
     if argv and argv[0] == "setup":
         from .setup_server import serve
         return serve()
+    if argv and argv[0] == "keys":
+        from . import keys
+        raise SystemExit(keys.main(argv[1:]))
     if argv and argv[0] == "onboard":
         from . import onboarding
         wrote = await onboarding.run()
@@ -300,7 +303,12 @@ def _doctor_checks() -> list[tuple[str, bool, str]]:
     if cfg is not None:
         for name, provider in sorted(cfg.providers.items()):
             rows.append((f"provider key: {name}", provider.has_key,
-                        "set" if provider.has_key else "missing"))
+                        provider.key_source if provider.has_key else "missing"))
+        plaintext = [n for n, p in sorted(cfg.providers.items()) if p.api_key_literal]
+        rows.append(("keys out of config.json", not plaintext,
+                    "all by reference" if not plaintext
+                    else f"{', '.join(plaintext)} stored in plaintext "
+                         f"-- run `omega keys migrate`"))
 
     if config.CONFIG_PATH.exists():
         mode = stat.S_IMODE(config.CONFIG_PATH.stat().st_mode)
@@ -345,6 +353,7 @@ def _usage_text() -> str:
         "  eval [...]               run the eval harness (see `omega eval --help`)\n"
         "  trace <id>               print a session's event trace (--tools, --json)\n"
         "  update                   update omega to the latest release\n"
+        "  keys [...]               show, store, or migrate provider API keys\n"
         "  doctor                   check your environment and config\n"
         "  setup                    browser-based setup wizard\n"
         "  onboard                  terminal setup wizard\n\n"
@@ -366,11 +375,11 @@ def _render_models_table(cfg: Config) -> str:
         if role.alias:
             role_defaults.setdefault(role.alias, []).append(role_name)
 
-    lines = [f"{'ALIAS':<10}{'MODEL':<26}{'PROVIDER':<16}{'CONTEXT':>10}"
+    lines = [f"{'ALIAS':<12}{'MODEL':<26}{'PROVIDER':<16}{'CONTEXT':>10}"
              f"{'EFFORT':>8}  DEFAULT FOR"]
     for alias, m in sorted(cfg.models.items()):
         roles = ", ".join(sorted(role_defaults.get(alias, [])))
-        lines.append(f"{alias:<10}{m.model:<26}{m.provider:<16}{m.context:>10,}"
+        lines.append(f"{alias:<12}{m.model:<26}{m.provider:<16}{m.context:>10,}"
                      f"{m.effort or '-':>8}  {roles}")
     return "\n".join(lines)
 

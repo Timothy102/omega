@@ -26,6 +26,7 @@ class StatusState:
     alias: str | None = None
     phase: str = "idle"
     sidebar_auto_hidden: bool = False
+    note: str = ""
 
 
 def _fmt_usage(usage: events.Usage | None) -> str:
@@ -61,12 +62,12 @@ def format_status(state: StatusState, *, width: int | None = None) -> str:
     tokens = _fmt_usage(state.usage)
     cache = _fmt_cache(state.usage)
     model = f"{state.alias} · {state.model}" if state.alias else state.model
-    full = f" {state.mode} · {model} · {tokens}{cache}"
+    full = f" {state.mode} · {model} · {tokens}{cache}{state.note}"
     if width is None or len(full) <= width:
         return full
     # Narrow terminal: drop the raw model id first -- the alias alone still
     # says which model is in use.
-    alias_only = f" {state.mode} · {state.alias or state.model} · {tokens}{cache}"
+    alias_only = f" {state.mode} · {state.alias or state.model} · {tokens}{cache}{state.note}"
     return alias_only if len(alias_only) <= width else alias_only[:width]
 
 

@@ -57,6 +57,21 @@ import Testing
     #expect(p.state == .thinking)
 }
 
+@Test func omegaTaskDecodesDaemonTaskOut() throws {
+    let json = """
+    {"id":"t1","title":"hello","repo":"/Users/tim/code/omega","cwd":"/tmp/omega-wt/t1",
+     "worktree":true,"branch":"omega/t1","pr":null,"model":"opus","mode":"build",
+     "status":"idle","phase":"idle","created":1,"updated":2,
+     "tokens_in":10,"tokens_out":20,"cost_usd":0.1,"elapsed_s":3}
+    """.data(using: .utf8)!
+    let task = try JSONDecoder().decode(OmegaTask.self, from: json)
+    #expect(task.repoPath == "/Users/tim/code/omega")
+    #expect(task.worktreePath == "/tmp/omega-wt/t1")
+    #expect(task.workspaceRoot == "/tmp/omega-wt/t1")
+    #expect(task.tokensUsed == 30)
+    #expect(task.createdAt == 1)
+}
+
 @Test func serveConfigDecodesFromDisk() throws {
     let json = #"{"host":"127.0.0.1","port":7777,"token":"abc","pid":42}"#.data(using: .utf8)!
     let config = try JSONDecoder().decode(ServeConfig.self, from: json)

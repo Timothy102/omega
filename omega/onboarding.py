@@ -46,14 +46,34 @@ _OPENROUTER = _Choice(
         "spark": {"model": "meta/muse-spark-1.3", "provider": "openrouter", "context": 1048576},
         "kimi": {"model": "moonshotai/kimi-k3", "provider": "openrouter", "context": 1048576},
         "glm": {"model": "z-ai/glm-5.3-flash", "provider": "openrouter", "context": 128000},
+        "sol": {"model": "openai/gpt-5.6-sol", "provider": "openrouter", "context": 1050000},
+        "terra": {"model": "openai/gpt-5.6-terra", "provider": "openrouter", "context": 1050000},
+        "luna": {"model": "openai/gpt-5.6-luna", "provider": "openrouter", "context": 1050000},
+        "codex": {"model": "openai/gpt-5.3-codex", "provider": "openrouter", "context": 400000},
+        "grok": {"model": "x-ai/grok-4.6", "provider": "openrouter", "context": 500000},
+        "grok-build": {"model": "x-ai/grok-build-0.1", "provider": "openrouter", "context": 256000},
     },
     default_alias="spark", cheap_alias="glm",
+)
+_OPENAI = _Choice(
+    provider_key="openai",
+    provider={"type": "openai", "baseUrl": "https://api.openai.com/v1", "apiKey": ""},
+    catalog={
+        "astra": {"model": "gpt-6-astra", "provider": "openai", "context": 1050000},
+        "sol": {"model": "gpt-5.6-sol", "provider": "openai", "context": 1050000},
+        "terra": {"model": "gpt-5.6-terra", "provider": "openai", "context": 1050000},
+        "luna": {"model": "gpt-5.6-luna", "provider": "openai", "context": 1050000},
+        "codex": {"model": "gpt-5.3-codex", "provider": "openai", "context": 400000},
+    },
+    default_alias="sol", cheap_alias="luna",
 )
 
 # USD per million tokens, (input, output) -- shown in the model picker.
 PRICES: dict[str, tuple[float, float]] = {
     "fable": (10, 50), "opus": (5, 25), "sonnet": (2, 10), "haiku": (1, 5),
     "spark": (1.25, 4.25), "kimi": (3, 15), "glm": (0.6, 2.2),
+    "astra": (10, 50), "sol": (2, 10), "terra": (2, 12), "luna": (0.2, 1.2), "codex": (1.75, 14),
+    "grok": (2, 6), "grok-build": (1, 2),
 }
 
 PURPOSES: dict[str, str] = {
@@ -64,14 +84,23 @@ PURPOSES: dict[str, str] = {
     "spark": "Meta's frontier — strong at agentic coding, cheap",
     "kimi": "strong open-weights, 1M context",
     "glm": "cheap and fast",
+    "astra": "OpenAI's flagship GPT-6 — limited rollout, priciest",
+    "sol": "GPT-5.6 top tier — strong reasoning and coding",
+    "terra": "GPT-5.6 mid tier — balanced cost and capability",
+    "luna": "GPT-5.6 fast tier — high volume, cheap",
+    "codex": "OpenAI's agentic coding model",
+    "grok": "SpaceX's Grok 4.6 — frontier agentic coding, 500k context",
+    "grok-build": "Grok's fast coding model — cheap",
 }
 
 # provider_key -> (label, one-liner, env var checked for "key found in environment")
 PROVIDER_INFO: list[tuple[str, str, str, str]] = [
     ("anthropic", "Anthropic  — Claude (recommended)",
      "Native Anthropic API access -- fable, opus, sonnet, haiku.", "ANTHROPIC_API_KEY"),
-    ("openrouter", "OpenRouter  — Claude, Kimi, GLM, GPT, Gemini and 200+ more",
+    ("openrouter", "OpenRouter  — Claude, GPT, Grok, Kimi, GLM, Gemini and 200+ more",
      "One key, hundreds of models, pay-as-you-go.", "OPENROUTER_API_KEY"),
+    ("openai", "OpenAI  — GPT-6 Astra, GPT-5.6, Codex",
+     "Native OpenAI API access -- the only route to GPT-6 Astra for now.", "OPENAI_API_KEY"),
     ("other", "Other OpenAI-compatible  — any /chat/completions endpoint",
      "Bring your own base URL: local models, other clouds, self-hosted.", ""),
 ]
@@ -89,6 +118,8 @@ def choice_for(provider_key: str, base_url: str = "") -> _Choice:
         return _ANTHROPIC
     if provider_key == "openrouter":
         return _OPENROUTER
+    if provider_key == "openai":
+        return _OPENAI
     return _Choice(provider_key="custom", provider={"type": "openai", "baseUrl": base_url, "apiKey": ""},
                   catalog={}, default_alias="", cheap_alias="")
 
@@ -166,12 +197,14 @@ async def _ask_choice(prompt: str, options: list[str], default: int = 1) -> int:
 async def run_plain() -> None:
     print("omega needs a model to drive it -- let's set one up (`omega setup` opens the full browser flow).")
     pick = await _ask_choice("Pick a provider:",
-                             ["Anthropic (native)", "OpenRouter", "Other OpenAI-compatible"])
+                             ["Anthropic (native)", "OpenRouter", "OpenAI (native)", "Other OpenAI-compatible"])
 
     if pick == 1:
         choice = _ANTHROPIC
     elif pick == 2:
         choice = _OPENROUTER
+    elif pick == 3:
+        choice = _OPENAI
     else:
         base_url = await _ask("Base URL (e.g. https://api.example.com/v1): ")
         choice = choice_for("other", base_url)

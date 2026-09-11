@@ -7,7 +7,8 @@ def test_known_aliases_priced():
     assert prices.PRICES["opus"] == (5.0, 25.0)
     assert prices.PRICES["sonnet"] == (2.0, 10.0)
     assert prices.PRICES["glm"] == (0.6, 2.2)
-    assert set(prices.PRICES) == {"fable", "opus", "sonnet", "haiku", "spark", "kimi", "glm"}
+    assert set(prices.PRICES) == {"fable", "opus", "sonnet", "haiku", "spark", "kimi", "glm",
+                                  "astra", "sol", "terra", "luna", "codex", "grok", "grok-build"}
 
 
 def test_estimate_cost_known_alias():

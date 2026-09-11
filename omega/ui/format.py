@@ -253,6 +253,29 @@ def style_for(name: str) -> str:
     return STYLE.get(category(name), "white")
 
 
+# One mark for every call, coloured by category. Shape carries the row's
+# STATE (ran / failed) and colour carries its kind -- splitting the two that
+# way keeps a burst of rows reading as one column of calls rather than a row
+# of unrelated symbols, and leaves `✕` unambiguous when it appears.
+CALL_GLYPH = "⏺"
+ERROR_GLYPH = "✕"
+
+
+def glyph_for(name: str, *, failed: bool = False) -> str:
+    """The row's gutter mark. A failed call keeps its category colour but
+    swaps to `✕` -- failure is the one thing that must be readable from
+    across the room, and shape carries further than a red that a dim
+    terminal theme may barely differentiate from the surrounding text."""
+    return ERROR_GLYPH if failed else CALL_GLYPH
+
+
+def display_name(name: str) -> str:
+    """`call_tool` -> `CallTool`. A capitalised name reads as the subject of
+    the row rather than as part of the argument text beside it, which a
+    lowercase name padded into a fixed column never quite did."""
+    return "".join(part.capitalize() for part in name.split("_"))
+
+
 # ---- per-tool call descriptions (C9a) --------------------------------------
 
 # Matches the `cd <dir> && ` a model prepends to keep a worktree's shell state
@@ -260,6 +283,47 @@ def style_for(name: str) -> str:
 # `<dir>` is a git worktree, so a burst of commands in the same worktree reads
 # as the actual command instead of a repeated absolute path.
 _BASH_CD_PREFIX_RE = re.compile(r"^cd\s+(\S+)\s+&&\s+")
+
+# Generous next to the one-line budget `tool_start` then applies -- the cap
+# here only stops a pathological heredoc from reaching the renderer, while
+# how much actually fits is decided against the real pane width downstream.
+_BASH_PREVIEW_CHARS = 400
+
+
+def _cd_tag(target: Path) -> str:
+    """A short name for a `cd`-ed directory: nothing when it is just the cwd,
+    the worktree marker when it is one, else the last path segment."""
+    worktree = _worktree_relpath(target)
+    if worktree is not None:
+        return worktree
+    try:
+        if target.resolve() == Path(os.getcwd()).resolve():
+            return ""
+    except OSError:
+        pass
+    return target.name or str(target)
+
+
+def _bash_command(raw: str) -> str:
+    """The command, with the model's `cd <path> && ` preamble moved to a
+    trailing `(in <dir>)` tag.
+
+    Models prefix nearly every call with a `cd` to pin the shell's cwd. Left
+    in place it spends most of the row on an absolute path the reader already
+    knows -- and since the row is then cut to fit, the cut lands exactly where
+    the command starts, which is the only part that differs between two rows.
+    Leading with the command puts the distinguishing text where the eye
+    already is."""
+    command = raw.replace("\n", "⏎")
+    match = _BASH_CD_PREFIX_RE.match(command)
+    if match is None:
+        return _truncate(command, _BASH_PREVIEW_CHARS)
+    target = Path(match.group(1)).expanduser()
+    if not target.is_absolute():
+        target = Path(os.getcwd()) / target
+    rest = _truncate(command[match.end():], _BASH_PREVIEW_CHARS)
+    tag = _cd_tag(target)
+    return f"{rest}  (in {tag})" if tag else rest
 
 
 def describe_call(name: str, args: dict[str, Any]) -> str:
@@ -281,17 +345,7 @@ def describe_call(name: str, args: dict[str, Any]) -> str:
         path = relpath(str(get("path") or "."))
         return f"glob  {pattern}  in {path}"
     if name == "bash":
-        command = str(get("command") or "").replace("\n", "⏎")
-        cd_match = _BASH_CD_PREFIX_RE.match(command)
-        if cd_match:
-            target = Path(cd_match.group(1)).expanduser()
-            if not target.is_absolute():
-                target = Path(os.getcwd()) / target
-            wt_tag = _worktree_relpath(target)
-            if wt_tag is not None:
-                rest = command[cd_match.end():]
-                return f"bash  $ (in {wt_tag}) {_truncate(rest, 80)}"
-        return f"bash  $ {_truncate(command, 80)}"
+        return f"bash  $ {_bash_command(str(get('command') or ''))}"
     if name == "write":
         content = get("content") or ""
         return f"write  {relpath(str(get('path') or ''))}  ({len(content)} chars)"
@@ -346,6 +400,50 @@ _FULL_CHARS_RE = re.compile(r"\[full output: (\d+) chars")
 _UNTRUSTED_WRAP_RE = re.compile(r'<untrusted source="[^"]*">\s*|\s*</untrusted>\s*$')
 
 
+_WROTE_RE = re.compile(r"wrote (\d+) lines")
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
+def _written_summary(text: str) -> str:
+    m = _WROTE_RE.search(text)
+    return f"Wrote {_plural(int(m.group(1)), 'line')}" if m else "Wrote file"
+
+
+def diff_counts(text: str) -> tuple[int, int]:
+    """`(additions, removals)` in a unified diff, ignoring its `---`/`+++`
+    file headers -- which start with the same characters as the content lines
+    and would otherwise each count as a change."""
+    added = removed = 0
+    for line in text.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def diff_style(line: str) -> str:
+    """The colour for one line of a rendered diff. Only ever applied to a
+    tool whose result IS a diff -- a grep hit beginning with `-` is ordinary
+    text, and colouring it as a removal would be a lie about the file."""
+    if line.startswith("+"):
+        return "green"
+    if line.startswith("-"):
+        return "red"
+    if line.startswith("@@"):
+        return "cyan"
+    return "dim"
+
+
+# Tools whose result is a unified diff, so its lines take diff colouring.
+DIFF_RESULT_TOOLS = {"edit"}
+
+
 def result_char_count(text: str, offloaded: bool) -> int:
     """The FULL result length, not the (possibly truncated) preview stored in
     `ToolEnd.result_preview` -- an offloaded result states its true length in
@@ -372,27 +470,33 @@ def describe_outcome(name: str, text: str, duration_s: float, offloaded: bool,
     parts: list[str] = []
     no_hits = stripped in ("(no matches)", "")
     if name == "read":
-        parts.append(f"{len(text.splitlines())} lines")
+        parts.append(f"Read {len(text.splitlines())} lines")
     elif name == "grep":
-        parts.append(f"{0 if no_hits else len(text.splitlines())} matches")
+        parts.append("No matches" if no_hits else f"Found {len(text.splitlines())} matches")
     elif name == "glob":
-        parts.append(f"{0 if no_hits else len(text.splitlines())} files")
+        parts.append("No files" if no_hits else f"Found {len(text.splitlines())} files")
+    elif name == "edit":
+        added, removed = diff_counts(text)
+        parts.append(f"Updated with {_plural(added, 'addition')} "
+                     f"and {_plural(removed, 'removal')}")
+    elif name == "write":
+        parts.append(_written_summary(stripped))
     elif name == "bash":
         m = _EXIT_RE.search(text)
         if m and m.group(1) != "0":
-            parts.append(f"exit {m.group(1)}")
+            parts.append(f"Exit {m.group(1)}")
     elif name == "find_tools":
         if stripped.startswith("no tools matched") or not stripped:
-            parts.append("no match")
+            parts.append("No match")
         else:
             count = stripped.count("\n\n") + 1
-            parts.append(f"{count} tool{'' if count == 1 else 's'}")
+            parts.append(f"Found {count} tool{'' if count == 1 else 's'}")
     elif name == "recall":
         if stripped == "(no matching memories)" or not stripped:
-            parts.append("none")
+            parts.append("None")
         else:
             count = stripped.count("\n\n") + 1
-            parts.append(f"{count} memor{'y' if count == 1 else 'ies'}")
+            parts.append(f"Found {count} memor{'y' if count == 1 else 'ies'}")
     elif name == "call_tool" and not offloaded:
         parts.append(f"{fmt_num(result_chars)} chars")
 
@@ -404,13 +508,114 @@ def describe_outcome(name: str, text: str, duration_s: float, offloaded: bool,
     return "→ " + " · ".join(parts) if parts else ""
 
 
+# ---- result previews --------------------------------------------------------
+
+# How many lines of a tool's OWN output are worth showing under its row
+# before the reader is better served by expanding it. Budgets differ because
+# the tools differ: a bash run's first lines are usually the whole answer, a
+# grep's are the matches themselves, while `read`'s are the top of a file the
+# reader already chose and can see in their editor -- its row's path and line
+# count say everything a preview would.
+PREVIEW_BUDGET = {
+    "bash": 6, "grep": 5, "glob": 5, "call_tool": 5,
+    "recall": 3, "find_tools": 3,
+    "edit": 12,          # the diff -- the whole point of showing the row
+    "read": 0, "write": 0,
+}
+PREVIEW_DEFAULT = 3
+# What an expanded block shows -- bounded, because `result_preview` can hold
+# several thousand characters and a block that outgrows the pane is no more
+# readable than one that shows nothing.
+PREVIEW_EXPANDED = 40
+
+# Footers the harness itself appends to a result. They are already stated in
+# the outcome line (`exit 1`, `12.4k chars · artifact a3`), so repeating them
+# inside the preview spends the budget restating what is one line below.
+_FOOTER_RE = re.compile(r"^\s*\[(?:exit \d+|full output:.*|truncated.*|stderr)\]\s*$")
+_NOISE_PREVIEWS = {"(no matches)", "(no output, exit 0)", "(no matching memories)"}
+
+
+def preview_lines(name: str, text: str, *, limit: int | None = None,
+                  width: int | None = None) -> list[str]:
+    """The first few real lines of a tool's own output, for display beneath
+    its call row.
+
+    A count alone (`60 lines`, `12 matches`) says a call happened but not
+    what it found, which is the one thing the reader is actually watching
+    for. This returns the evidence itself -- already trimmed of the harness's
+    own footers, blank runs, and anything past `width` -- so the common case
+    needs no expansion at all."""
+    if limit is None:
+        limit = PREVIEW_BUDGET.get(name, PREVIEW_DEFAULT)
+    if limit <= 0:
+        return []
+    stripped = text.strip()
+    if not stripped or stripped in _NOISE_PREVIEWS or stripped.startswith("error:"):
+        return []
+    # A diff result opens with the tool's own `edited <path>` acknowledgement,
+    # which the call row above already says. Keeping only real diff lines
+    # drops it without having to special-case its wording.
+    is_diff = name in DIFF_RESULT_TOOLS
+    out: list[str] = []
+    for raw in stripped.splitlines():
+        line = raw.rstrip()
+        if not line.strip() or _FOOTER_RE.match(line):
+            continue
+        if is_diff and not line.startswith(("+", "-", "@@", " ")):
+            continue
+        # Tabs render at whatever width the terminal chose, which breaks the
+        # rail's alignment; expand them here so every preview line starts
+        # exactly where the one above it did.
+        line = line.expandtabs(4)
+        if width is not None:
+            line = truncate_right(line, width)
+        out.append(line)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def preview_hidden(name: str, text: str, shown: int) -> int:
+    """How many more non-empty lines the full result holds beyond `shown` --
+    the number the collapsed block advertises as worth expanding for."""
+    stripped = text.strip()
+    if not stripped or stripped in _NOISE_PREVIEWS:
+        return 0
+    total = sum(1 for line in stripped.splitlines()
+                if line.strip() and not _FOOTER_RE.match(line.rstrip()))
+    return max(0, total - shown)
+
+
 # ---- transcript one-liners --------------------------------------------------
 
+# A bash command is the one detail worth more than a single row: it is what
+# the reader is deciding about, and cutting it to one line reliably cuts it
+# mid-path. Three lines' worth of budget, still middle-truncated so both the
+# command's head and its (usually more specific) tail survive.
+_WIDTH_BUDGET = {"bash": 3}
+
+
+def call_args(name: str, args_preview: str) -> str:
+    """The parenthesised argument text for a call row. `describe_call` writes
+    for a padded-column layout -- double spaces separating fields, a leading
+    `$` marking bash's shell text -- both of which are chrome that `Name(...)`
+    supplies on its own."""
+    detail = _without_name(name, args_preview).strip()
+    if name == "bash":
+        detail = detail.removeprefix("$ ")
+    return re.sub(r"\s{2,}", " ", detail)
+
+
 def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True,
-               width: int | None = None) -> str:
+               width: int | None = None, failed: bool = False) -> str:
     style = style_for(ev.name)
-    detail = _without_name(ev.name, ev.args_preview)
-    name_col = pad_name(ev.name)
+    detail = call_args(ev.name, ev.args_preview)
+    label = display_name(ev.name)
+    if width is not None:
+        width *= _WIDTH_BUDGET.get(ev.name, 1)
+        # The name and its brackets are chrome the argument text must fit
+        # around, not extra room it can spend.
+        width = max(8, width - len(label) - 2)
     if ev.subagent_id:
         # The tier/id suffix is appended AFTER truncation, not before it --
         # its own length must come out of `width`'s budget first, or a
@@ -420,11 +625,19 @@ def tool_start(ev: events.ToolStart, *, show_subagent_suffix: bool = True,
         if width is not None:
             detail = truncate_middle(detail, max(0, width - len(suffix)))
         detail = esc(detail)
-        return f"  [dim]└ [{style}]{name_col}[/{style}]{detail}{suffix}[/dim]"
+        # `└` stays: under a subagent it marks NESTING, which the call glyph
+        # does not replace -- the glyph follows it so a nested row still says
+        # both where it sits and what it is.
+        mark = glyph_for(ev.name, failed=failed)
+        return (f"  [dim]└ {mark} [{style}]{label}[/{style}]"
+                f"({detail}){suffix}[/dim]")
     if width is not None:
         detail = truncate_middle(detail, width)
     detail = esc(detail)
-    return f"[{style}]●[/{style}] [bold {style}]{name_col}[/bold {style}]{detail}"
+    mark = glyph_for(ev.name, failed=failed)
+    mark_style = "bold red" if failed else style
+    return (f"[{mark_style}]{mark}[/{mark_style}] [bold {style}]{label}[/bold {style}]"
+            f"[dim]([/dim]{detail}[dim])[/dim]")
 
 
 def tool_end(ev: events.ToolEnd) -> str | None:

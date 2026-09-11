@@ -22,7 +22,9 @@ def test_cache_cell_shown_after_tokens_cell():
                          cache_read=870, cache_write=50)
     out = format_status(make_state(usage))
     assert "cache 87%" in out
-    assert out.index("tokens") < out.index("cache 87%")
+    # Usage is `used/limit` (no "tokens" label); cache trails it.
+    assert "1.1k/1.0M" in out
+    assert out.index("1.1k/1.0M") < out.index("cache 87%")
 
 
 def test_cache_pct_rounds_from_cache_read_over_prompt_tokens():

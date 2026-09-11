@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		115089B291424A24188B3BB5 /* QuickSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CB8B34579E21E5D1CB15471 /* QuickSwitcherView.swift */; };
+		8F5B02D3C9E14026B7D389A2 /* ComposerTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E4A91C2B8D03F15A6C27891 /* ComposerTextView.swift */; };
+		AB7D24F5EB036248D9F5ABC4 /* WorkspaceFileIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A6C13E4DAF25137C8E49AB3 /* WorkspaceFileIndex.swift */; };
 		14F8806810AE4A9CA464CB59 /* DiffSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40AAAF15700ECC85FD947F18 /* DiffSheetView.swift */; };
 		18BA276C737ACA1F832C3CC5 /* InspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6295ED8A47A5B9B8C4BDEA01 /* InspectorView.swift */; };
 		1A6A9DD0DE88E19C84E66CD8 /* ConnectionStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EB4EF388BFB5265BE70D431 /* ConnectionStyle.swift */; };
@@ -60,6 +62,8 @@
 		40AAAF15700ECC85FD947F18 /* DiffSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffSheetView.swift; sourceTree = "<group>"; };
 		4C60AED5C23C169388DB4605 /* Omega.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Omega.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4CB8B34579E21E5D1CB15471 /* QuickSwitcherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSwitcherView.swift; sourceTree = "<group>"; };
+		7E4A91C2B8D03F15A6C27891 /* ComposerTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerTextView.swift; sourceTree = "<group>"; };
+		9A6C13E4DAF25137C8E49AB3 /* WorkspaceFileIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileIndex.swift; sourceTree = "<group>"; };
 		6295ED8A47A5B9B8C4BDEA01 /* InspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InspectorView.swift; sourceTree = "<group>"; };
 		665FFC25DC07A0B424DBEA31 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		6EB4EF388BFB5265BE70D431 /* ConnectionStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStyle.swift; sourceTree = "<group>"; };
@@ -130,7 +134,9 @@
 			isa = PBXGroup;
 			children = (
 				9AE5848A5B46F9941CF06098 /* AskUserCardView.swift */,
+				7E4A91C2B8D03F15A6C27891 /* ComposerTextView.swift */,
 				B0F5299E6DA6CE87E14567BC /* ComposerView.swift */,
+				9A6C13E4DAF25137C8E49AB3 /* WorkspaceFileIndex.swift */,
 				9172534C401CC033BD5A2229 /* ConfirmCardView.swift */,
 				99FF2760F368C2DAC33B2579 /* StatusLineView.swift */,
 				3D4F494D6214CEDFA7D30D8B /* TaskDetailView.swift */,
@@ -337,7 +343,9 @@
 				98F710AE82F305E4B330002D /* AppSettings.swift in Sources */,
 				A73B89950B94544CF6AE8DCB /* AppState.swift in Sources */,
 				FC78BE63A19FB2467986ADED /* AskUserCardView.swift in Sources */,
+				8F5B02D3C9E14026B7D389A2 /* ComposerTextView.swift in Sources */,
 				899EEB036D25890008E84776 /* ComposerView.swift in Sources */,
+				AB7D24F5EB036248D9F5ABC4 /* WorkspaceFileIndex.swift in Sources */,
 				8F0A2BC07C4385C8B769B464 /* ConfirmCardView.swift in Sources */,
 				F83C7B6C6D0D9F45181CBD66 /* ConnectionPill.swift in Sources */,
 				1A6A9DD0DE88E19C84E66CD8 /* ConnectionStyle.swift in Sources */,
