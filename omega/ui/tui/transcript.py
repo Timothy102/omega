@@ -20,6 +20,7 @@ from typing import Any
 from rich.markdown import Markdown
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.content import Content
 from textual.events import Click, Resize
 from textual.timer import Timer
 from textual.widgets import Static
@@ -316,6 +317,16 @@ class _NewOutputPill(Static):
         self._click_cb()
 
 
+def _with_cursor(text: str, cursor: str) -> Content:
+    """Model text is data, not markup. Escaping is not enough here: a
+    delta that stops on a backslash (`contact\\` of `contact\\_sheet`) or an
+    unclosed `[` (a link mid-stream) makes Textual's parser swallow the
+    cursor's opening tag, and its `[/dim]` then raises `MarkupError` from
+    the heartbeat timer. So the text is never parsed at all -- only the
+    cursor is."""
+    return Content(text) + Content.from_markup(cursor)
+
+
 class Transcript(VerticalScroll):
     DEFAULT_CSS = """
     Transcript {
@@ -520,9 +531,8 @@ class Transcript(VerticalScroll):
         return f"[{style}]{_CURSOR}[/{style}]"
 
     def _paint_live(self, cursor: str) -> None:
-        # Model text is data, not markup -- a stray "[/x]" must never raise.
         if self._live_assistant is not None:
-            self._live_assistant.update(format.esc(self._live_text) + cursor)
+            self._live_assistant.update(_with_cursor(self._live_text, cursor))
 
     def _beat_cursor(self) -> None:
         self._cursor_frame += 1
@@ -554,7 +564,7 @@ class Transcript(VerticalScroll):
         there when the reader's eye arrives at the end of the sentence that
         just finished."""
         self._stop_cursor()
-        widget.update(format.esc(text) + f"[dim]{_CURSOR}[/dim]")
+        widget.update(_with_cursor(text, f"[dim]{_CURSOR}[/dim]"))
 
         def finish() -> None:
             widget.update(Markdown(text, code_theme=self._code_theme()))

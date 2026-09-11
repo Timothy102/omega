@@ -14,19 +14,28 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from rich.markup import escape
-
 from .. import events
 
-# A plain assignment, not `import escape as esc` -- mypy strict's
-# no-implicit-reexport rule hides a renamed import from other modules unless
-# it's re-exported via `__all__`, but a module-level name binding like this
-# one is an ordinary public attribute. `format.esc` is used by every module
-# that renders model/tool/user-derived text into rich markup (`transcript.py`,
-# `sidebar.py`, `plain.py`) -- a literal "[" in a bash command, a commit
-# subject, or a provider error message must never be parsed as a style tag
-# (that raised `MarkupError` and aborted the turn before this was added).
-esc = escape
+_OPEN_BRACKET = re.compile(r"(\\*)\[")
+
+
+def esc(text: str) -> str:
+    """`text` as a markup literal. Used by every module that renders
+    model/tool/user-derived text into markup (`transcript.py`, `sidebar.py`,
+    `plain.py`) -- a literal "[" in a bash command, a commit subject, or a
+    provider error message must never be parsed as a style tag (that raised
+    `MarkupError` and aborted the turn before this was added).
+
+    Not `rich.markup.escape`: that only escapes brackets that already look
+    like a tag, so an unclosed `[` (a markdown link cut mid-stream) sails
+    through and Textual's parser then swallows whatever tag follows it,
+    which raises on the matching close. Both Rich and Textual read `\\[` as
+    a literal bracket wherever it sits, so every one is escaped."""
+    text = _OPEN_BRACKET.sub(lambda m: m.group(1) * 2 + "\\[", text)
+    if (len(text) - len(text.rstrip("\\"))) % 2:
+        text += "\\"
+    return text
+
 
 # ---- paths ---------------------------------------------------------------
 

@@ -1184,3 +1184,22 @@ async def test_going_idle_stops_the_heartbeat():
         t.note_phase("idle")
         await pilot.pause()
         assert t._cursor_timer is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delta", ["contact\\", "see [the", "path\\ then [ more"])
+async def test_streaming_text_is_never_parsed_as_markup(delta):
+    # A delta ending on a backslash or an unclosed "[" used to make Textual's
+    # parser swallow the cursor's opening tag; its "[/dim]" then raised
+    # MarkupError from the heartbeat timer and took the whole app down.
+    app = make_app()
+    async with app.run_test() as pilot:
+        t = app.query_one(Transcript)
+        t.add_text_delta(delta)
+        await pilot.pause()
+        t._beat_cursor()
+        t._beat_cursor()
+        t.finalize_turn(delta)
+        await pilot.pause()
+        joined = "\n".join(_texts(t))
+        assert delta in joined and transcript_module._CURSOR in joined

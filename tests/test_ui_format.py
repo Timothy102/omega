@@ -1,5 +1,6 @@
 import io
 
+import pytest
 from rich.console import Console
 from rich.text import Text
 
@@ -348,3 +349,12 @@ def test_diff_lines_colour_by_their_sign():
     assert format.diff_style("+added") == "green"
     assert format.diff_style("-removed") == "red"
     assert format.diff_style("@@ -1 +1 @@") == "cyan"
+
+
+@pytest.mark.parametrize("raw", ["echo [ unclosed", "grep '[abc' f", "x [1] y", "[/dim] early"])
+def test_esc_makes_any_bracket_a_literal_for_both_parsers(raw):
+    from textual.markup import to_content
+
+    markup = f"[dim]{format.esc(raw)}[/dim] [bold]tag[/bold]"
+    assert raw in _render_ok(markup)
+    assert to_content(markup).plain.startswith(raw)
